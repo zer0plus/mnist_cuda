@@ -12,6 +12,7 @@
 #define BATCH_SIZE 64
 #define TRAIN_SPLIT 0.8
 #define PRINT_INTERVAL 1000
+#define TILE_SIZE 32
 
 #define TRAIN_IMG_PATH "./data/train-images.idx3-ubyte"
 #define TRAIN_LABEL_PATH "./data/train-labels.idx1-ubyte"
@@ -22,6 +23,7 @@
         if (error != cudaSuccess) { \
             fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
                     cudaGetErrorString(error)); \
+            cudaDeviceReset(); \
             exit(EXIT_FAILURE); \
         } \
     } while(0)

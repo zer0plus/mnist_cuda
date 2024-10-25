@@ -8,14 +8,24 @@ HOW TO TEST C vs CUDA:
 Test File Compilition and Linking
  - mnist.c: 
 gcc -O3 -march=native -ffast-math -c mnist.c -o mnist.o
+gcc -DRUN_MNIST_CPU -O3 -march=native -ffast-math -c mnist.c -o mnist.o
 gcc -DRUN_MNIST_CPU -O3 -march=native -ffast-math mnist.o -o mnist -lm
 
  - mnist.cu: 
+nvcc -O3 -arch=sm_86 -rdc=true -c mnist.cu -o mnist_cuda.o
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA -c mnist.cu -o mnist_cuda.o
-nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand -lcuda
 
  - tests:
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_RELU_TEST -o test_relu test_relu.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_SOFTMAX_TEST -o test_softmax test_softmax.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_INIT_TEST -o test_init test_init.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
 nvcc -O3 -g -arch=sm_86 -rdc=true -DRUN_READ_TEST -o test_read test_read.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
+
+TODO:
+- compare gpu_naive vs ur faulty implementation and fix
+    -  fix up the image implementation in train loop
+- write resume pointers
+- plan out further optimizations
+- 
+

@@ -98,46 +98,6 @@ void shuffle_data(unsigned char *imgs, unsigned char *labels, int n) {
 }
 
 
-void linear(GenericLayer *layer, float *inp, float *out) {
-    for (int i = 0; i < layer->out_size; i++) {
-        //init biases of layer to be calcd
-        out[i] = layer->biases[i];
-    }
-    for (int x = 0; x < layer->in_size; x++) {
-        float input_x = inp[x];
-        //getting the start of each weight row, so each index doesn't need to be recalculated
-        float *weight_row_start = &layer->weights[x * layer->out_size];
-        for (int j = 0; j < layer->out_size; j++) {
-            out[j] += input_x * weight_row_start[j];
-        }
-    }
-}
-
-
-void backward(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
-    for (int i = 0; i < layer->in_size; i++) {
-        float *weight_row_start = &layer->weights[i * layer->out_size];
-        float input_i = inp[i];
-        if (in_grad) {
-            in_grad[i] = 0.0f;
-            for (int j = 0; j < layer->out_size; j++) {
-                in_grad[i] += out_grad[j] * weight_row_start[j];
-                weight_row_start[j] -= lr * (out_grad[j] * input_i);
-            }
-        }
-        else {
-            for (int j = 0; j < layer->out_size; j++) {
-                weight_row_start[j] -= lr * (out_grad[j] * input_i);
-            }
-        }
-        
-    }
-    for (int i = 0; i < layer->out_size; i++) {
-        layer->biases[i] -= lr * out_grad[i];
-    }
-}
-
-
 void init_layer(GenericLayer *layer, int in_size, int out_size) {
     size_t n = in_size * out_size;
     //to normally distribute our weights with rand values
@@ -154,6 +114,76 @@ void init_layer(GenericLayer *layer, int in_size, int out_size) {
     for (int i = 0; i < n; i++) { // sets weights to a random value and scales using inp size
         // layer->weights[i] = (5.0f - 0.5f) * 2 * scale;
         layer->weights[i] = ((float)rand() / RAND_MAX - 0.5f) * 2 * scale;
+    }
+}
+void print_host_tensor(const char* tensor_name, float* h_ptr, int shape_size, int num_elements_to_print) {
+    // Get actual size in bytes and calculate number of elements
+    size_t actual_elements = sizeof(*h_ptr) * shape_size;  // This gives us total bytes allocated
+    size_t num_float_elements = actual_elements / sizeof(float);  // Convert bytes to number of float elements
+    
+    // Ensure we don't try to print more elements than exist
+    num_elements_to_print = (num_elements_to_print > shape_size) ? shape_size : num_elements_to_print;
+    
+    // Print tensor information
+    printf("%s: dtype=float32, shape=(%d,), allocated_bytes=%zu, actual_elements=%zu\n", 
+           tensor_name, shape_size, actual_elements, num_float_elements);
+    
+    // Print elements
+    printf("First %d elements: [", num_elements_to_print);
+    for (int i = 0; i < num_elements_to_print; i++) {
+        printf("%.4f", h_ptr[i]);
+        if (i < num_elements_to_print - 1) {
+            printf(", ");
+        }
+    }
+    printf("]%s\n", shape_size > num_elements_to_print ? ", ...]" : "]");
+}
+
+
+void linear(GenericLayer *layer, float *inp, float *out) {
+    for (int i = 0; i < layer->out_size; i++) {
+        //init biases of layer to be calcd
+        out[i] = layer->biases[i];
+    }
+    static int count = 0;
+    if (count == 0) {
+        // Debug print for bias initialization
+        print_host_tensor("Bias tensor", out, layer->out_size, 12);
+        count++;
+    }
+
+    for (int x = 0; x < layer->in_size; x++) {
+        float input_x = inp[x];
+        //getting the start of each weight row, so each index doesn't need to be recalculated
+        float *weight_row_start = &layer->weights[x * layer->out_size];
+        for (int j = 0; j < layer->out_size; j++) {
+            out[j] += input_x * weight_row_start[j];
+        }
+    }
+}
+
+
+void backward(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
+    
+    // go through the input layer
+    for (int i = 0; i < layer->in_size; i++) {
+        float *weight_row_start = &layer->weights[i * layer->out_size];
+        float input_i = inp[i];
+        if (in_grad) {
+            in_grad[i] = 0.0f;
+            for (int j = 0; j < layer->out_size; j++) {
+                in_grad[i] += out_grad[j] * weight_row_start[j];
+                weight_row_start[j] -= lr * (out_grad[j] * input_i);
+            }
+        }
+        else {
+            for (int j = 0; j < layer->out_size; j++) {
+                weight_row_start[j] -= lr * (out_grad[j] * input_i);
+            }
+        }
+    }
+    for (int i = 0; i < layer->out_size; i++) {
+        layer->biases[i] -= lr * out_grad[i];
     }
 }
 
@@ -223,8 +253,8 @@ int main() {
     clock_t start, end;
     double cpu_time_used;
 
-    srand(42);
-    // srand(time(NULL));
+    // srand(42);
+    srand(time(NULL));
 
     init_layer(&mnist_net.hidden, INPUT_LAYER_SIZE, HIDDEN_LAYER_SIZE);
     init_layer(&mnist_net.output, HIDDEN_LAYER_SIZE, OUTPUT_LAYER_SIZE);
@@ -232,7 +262,7 @@ int main() {
     read_mnist_imgs(TRAIN_IMG_PATH, &data.imgs, &data.num_imgs);
     read_mnist_labels(TRAIN_LABEL_PATH, &data.labels, &data.num_imgs);
 
-    shuffle_data(data.imgs, data.labels, data.num_imgs);
+    // shuffle_data(data.imgs, data.labels, data.num_imgs);
 
     int train_size = (int)(data.num_imgs * TRAIN_SPLIT);
     int test_size = data.num_imgs - train_size;
@@ -246,7 +276,7 @@ int main() {
             }
             float *final_out = train_mnist(&mnist_net, img, data.labels[i], lr);
             // what loss func
-            total_loss += logf(final_out[data.labels[i]] + 1e-10f);
+            total_loss -= logf(final_out[data.labels[i]] + 1e-10f);
         }
 
         int correct = 0;
