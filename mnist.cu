@@ -10,8 +10,8 @@
 #include <thrust/extrema.h>
 #include "consts.cuh"
 #include <cuda.h>
-// The MNIST image/label file structure is as follows:
 
+// The MNIST image/label file structure is as follows:
 //     [offset] [type] [value] [description]
 //     0000 32 bit int 0x00000803 magic number
 //     0004 32 bit int 60000 number of images
@@ -22,8 +22,8 @@
 //     ........
 //     xxxx unsigned byte ?? pixel
 
+
 void print_device_tensor(const char* tensor_name, float* d_ptr, int shape_size, int num_elements_to_print) {
-    // Get the actual allocated size using CUDA Driver API
     CUdeviceptr base;
     size_t actual_size;
     cuMemGetAddressRange(&base, &actual_size, (CUdeviceptr)d_ptr);
@@ -52,8 +52,6 @@ void print_device_tensor(const char* tensor_name, float* d_ptr, int shape_size, 
     
     free(h_data);
 }
-
-
 
 
 // Kernel to initialize random number generators
@@ -299,7 +297,6 @@ void shuffle_data_cuda(float *imgs, unsigned char *labels, int num_imgs, int img
 
     // Synchronize to ensure all pixel swaps are complete
     CUDA_CHECK(cudaDeviceSynchronize());
-
     CUDA_CHECK(cudaFree(d_indices));
     free(h_indices);
 }
@@ -335,13 +332,6 @@ void linear_cuda(GenericLayer *layer, float *inp, float *out) {
     // DO YOU REALLY NEED TO CALL SYNC THIS EARLY, CHECK IT
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    static int count = 0;
-    if (count == 0) {
-        // Debug print for bias initialization
-        print_device_tensor("\nBias tensor copy: ", out, layer->out_size, 12);
-        count++;
-    }
-
     float *d_partial_sums;
     CUDA_CHECK(cudaMalloc(&d_partial_sums, layer->out_size * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_partial_sums, 0, layer->out_size * sizeof(float)));
@@ -350,12 +340,6 @@ void linear_cuda(GenericLayer *layer, float *inp, float *out) {
     dim3 grid_size_dot((layer->in_size + block_size_dot.x - 1) / block_size_dot.x,
                        (layer->out_size + block_size_dot.y - 1) / block_size_dot.y);
 
-    // dim3 threads_per_block(16, 16);
-    // dim3 num_blocks(
-    //     (layer->in_size + threads_per_block.x - 1) / threads_per_block.x,
-    //     (layer->out_size + threads_per_block.y - 1) / threads_per_block.y
-    // );
-
     dot_product_kernel<<<grid_size_dot, block_size_dot>>>(layer->weights, inp, d_partial_sums, layer->in_size, layer->out_size);
     CUDA_CHECK(cudaGetLastError());
 
@@ -363,14 +347,7 @@ void linear_cuda(GenericLayer *layer, float *inp, float *out) {
     matrix_multiply_kernel<<<num_blocks_multiply, block_size>>>(layer->weights, inp, out, d_partial_sums, layer->in_size, layer->out_size);
     CUDA_CHECK(cudaGetLastError());
 
-    if (count == 1) {
-        // Debug print for bias initialization
-        print_device_tensor("\nout after linear:", out, layer->out_size, 12);
-        count++;
-    }
-
     CUDA_CHECK(cudaDeviceSynchronize());
-
     CUDA_CHECK(cudaFree(d_partial_sums));
 }
 
@@ -430,45 +407,137 @@ __global__ void relu_derivative_kernel(float *grad, float *out, int size) {
     }
 }
 
-__global__ void backward_kernel(float *weights, float *biases, float *inp, float *out_grad, float *in_grad, int in_size, int out_size, float lr) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void weight_gradient_kernel(float *weights, float *inp, 
+    float *out_grad, int in_size, int out_size, float lr) {
     
-    if (idx < in_size) {
-        float *weight_row_start = &weights[idx * out_size];
-        float input_i = inp[idx];
-        
-        if (in_grad) {
-            float temp_grad = 0.0f;
-            for (int j = 0; j < out_size; j++) {
-                temp_grad += out_grad[j] * weight_row_start[j];
-                weight_row_start[j] -= lr * (out_grad[j] * input_i);
-            }
-            atomicAdd(&in_grad[idx], temp_grad);
-        }
-        else {
-            for (int j = 0; j < out_size; j++) {
-                weight_row_start[j] -= lr * (out_grad[j] * input_i);
-            }
-        }
+    // Use 2D thread blocks for better parallelism
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    __shared__ float shared_out_grad[TILE_SIZE];
+    __shared__ float shared_inp[TILE_SIZE];
+    
+    // Collaborative loading of input and output gradients
+    if (threadIdx.x < blockDim.x && col < out_size) {
+        shared_out_grad[threadIdx.x] = out_grad[col];
     }
+    if (threadIdx.y < blockDim.y && row < in_size) {
+        shared_inp[threadIdx.y] = inp[row];
+    }
+    __syncthreads();
     
+    if (row < in_size && col < out_size) {
+        // Coalesced access: threads in the same warp access consecutive memory locations
+        weights[row * out_size + col] -= lr * (shared_out_grad[threadIdx.x] * shared_inp[threadIdx.y]);
+    }
+}
+
+__global__ void input_gradient_kernel(float *weights, float *out_grad, 
+    float *in_grad, int in_size, int out_size) {
+    
+    int row = blockIdx.x * blockDim.x + threadIdx.x;  // input dimension
+    extern __shared__ float shared_out_grad[];
+    
+    // Cooperatively load output gradients
+    if (threadIdx.x < out_size) {
+        shared_out_grad[threadIdx.x] = out_grad[threadIdx.x];
+    }
+    __syncthreads();
+    
+    if (row < in_size) {
+        float grad_sum = 0.0f;
+        float *weight_row = &weights[row * out_size];
+        
+        #pragma unroll
+        for (int col = 0; col < out_size; col++) {
+            grad_sum += shared_out_grad[col] * weight_row[col];
+        }
+        atomicAdd(&in_grad[row], grad_sum);
+    }
+}
+__global__ void bias_update_kernel(float *biases, float *out_grad, 
+    int out_size, float lr) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < out_size) {
         biases[idx] -= lr * out_grad[idx];
     }
 }
 
-void backward_cuda(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
+void backward_cuda(GenericLayer *layer, float *inp, float *out_grad, 
+    float *in_grad, float lr) {
+    
+    dim3 block(16, 16);
+    dim3 grid(
+        (layer->out_size + block.x - 1) / block.x,
+        (layer->in_size + block.y - 1) / block.y
+    );
+    size_t shared_mem_size_weight = (block.x + block.y) * sizeof(float);
+
+    weight_gradient_kernel<<<grid, block, shared_mem_size_weight>>>(
+    layer->weights, inp, out_grad, layer->in_size, layer->out_size, lr);
+
     int block_size = 256;
     int num_blocks_in = (layer->in_size + block_size - 1) / block_size;
+    size_t shared_mem_size = layer->out_size * sizeof(float);
+    
+    if (in_grad) {
+        input_gradient_kernel<<<num_blocks_in, block_size, shared_mem_size>>>(
+            layer->weights, out_grad, in_grad, layer->in_size, layer->out_size);
+    }
+    
     int num_blocks_out = (layer->out_size + block_size - 1) / block_size;
+    bias_update_kernel<<<num_blocks_out, block_size>>>(
+        layer->biases, out_grad, layer->out_size, lr);
     
-    int num_blocks = max(num_blocks_in, num_blocks_out);
-    
-    backward_kernel<<<num_blocks, block_size>>>(layer->weights, layer->biases, inp, out_grad, in_grad, layer->in_size, layer->out_size, lr);
     CUDA_CHECK(cudaGetLastError());
-
-    CUDA_CHECK(cudaDeviceSynchronize());
 }
+
+
+// __global__ void backward_kernel(float *weights, float *biases, float *inp, float *out_grad, float *in_grad, int in_size, int out_size, float lr) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     int tid = threadIdx.x;
+//     extern __shared__ float shared_out_grad[];
+//     if (tid < out_size) {
+//         shared_out_grad[tid] = out_grad[tid];
+//     }
+//     __syncthreads();
+
+//     if (idx < in_size) {
+//         float input_i = inp[idx];
+//         float *weight_row_start = &weights[idx * out_size];
+        
+//         if (in_grad) {
+//             float temp_grad = 0.0f;
+//             #pragma unroll
+//             for (int j = 0; j < out_size; j++) {
+//                 temp_grad += shared_out_grad[j] * weight_row_start[j];
+//                 weight_row_start[j] -= lr * (shared_out_grad[j] * input_i);
+//             }
+//             atomicAdd(&in_grad[idx], temp_grad);
+//         }
+//         else {
+//             #pragma unroll
+//             for (int j = 0; j < out_size; j++) {
+//                 weight_row_start[j] -= lr * (shared_out_grad[j] * input_i);
+//             }
+//         }
+//     }
+//     if (idx < out_size) {
+//         biases[idx] -= lr * shared_out_grad[idx];
+//     }
+// }
+// void backward_cuda(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
+//     int block_size = 256;
+//     int num_blocks_in = (layer->in_size + block_size - 1) / block_size;
+//     int num_blocks_out = (layer->out_size + block_size - 1) / block_size;
+//     int num_blocks = max(num_blocks_in, num_blocks_out);
+//     size_t shared_mem_size = layer->out_size * sizeof(float);
+    
+//     backward_kernel<<<num_blocks, block_size, shared_mem_size>>>(layer->weights, layer->biases, inp, out_grad, in_grad, layer->in_size, layer->out_size, lr);
+//     CUDA_CHECK(cudaGetLastError());
+//     CUDA_CHECK(cudaDeviceSynchronize());
+// }
 
 __global__ void update_out_grad_kernel(float *out_grad, float *output, unsigned char *d_labels, int d_label_idx) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -479,8 +548,7 @@ __global__ void update_out_grad_kernel(float *out_grad, float *output, unsigned 
 }
 
 
-
-float* train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_label_idx, float lr) {
+void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_label_idx, float lr, float* final_out) {
     static float *d_final_output, *d_hidden_out, *d_out_grad, *d_hidden_grad;
     static bool first_run = true;
 
@@ -526,14 +594,14 @@ float* train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d
     
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    float *final_output = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(final_output, d_final_output, OUTPUT_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+    // float *final_output = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
+    CUDA_CHECK(cudaMemcpy(final_out, d_final_output, OUTPUT_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
     
-    return final_output;
+    // return final_out;
 }
 
 // forward only 
-int forward(Network *net, float *inp) {
+int forward(Network *net, float *inp, float *final_out) {
     static float *d_hidden_out, *d_final_output;
     static bool first_run = true;
 
@@ -552,7 +620,7 @@ int forward(Network *net, float *inp) {
     linear_cuda(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
 
-    float* final_out = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
+    // float* final_out = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
     CUDA_CHECK(cudaMemcpy(final_out, d_final_output, OUTPUT_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
     
     int ans = 0;
@@ -562,7 +630,7 @@ int forward(Network *net, float *inp) {
             ans = i;
         }
     }
-    free(final_out);
+    // free(final_out);
     return ans;
 }
 
@@ -597,7 +665,7 @@ int main() {
     int test_size = data.num_imgs - train_size;
     unsigned char* h_labels = (unsigned char*) malloc(data.num_imgs * sizeof(unsigned char));
     // float* h_imgs = (float*) malloc(data.num_imgs * INPUT_LAYER_SIZE * sizeof(float));
-    float *final_out;
+    float *final_out = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
     float total_loss = 0;
 
     CUDA_CHECK(cudaMemcpy(h_labels, data.labels, data.num_imgs * sizeof(unsigned char), cudaMemcpyDeviceToHost));
@@ -624,7 +692,7 @@ int main() {
                 }
                 printf("\n");
             }
-            final_out = train_mnist_cuda(&mnist_net, current_img, data.labels, i, lr);
+            train_mnist_cuda(&mnist_net, current_img, data.labels, i, lr, final_out);
             // printf("CURR LABEL: %u\n", h_labels[i]);
             total_loss -= logf(fmaxf(final_out[h_labels[i]], 1e-10f));
         }
@@ -632,7 +700,7 @@ int main() {
         int correct = 0;
         for (int i = train_size; i < data.num_imgs; i++) {
             float *test_img = data.imgs + (i * IMAGE_SIZE);
-            if (forward(&mnist_net, test_img) == h_labels[i]) {
+            if (forward(&mnist_net, test_img, final_out) == h_labels[i]) {
                 correct++;
             }
         }

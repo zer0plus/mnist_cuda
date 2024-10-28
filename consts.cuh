@@ -8,7 +8,7 @@
 #define HIDDEN_LAYER_SIZE 256
 #define OUTPUT_LAYER_SIZE 10
 #define LEARNING_RATE 0.0005f
-#define EPOCHS 20
+#define EPOCHS 2
 #define BATCH_SIZE 64
 #define TRAIN_SPLIT 0.8
 #define PRINT_INTERVAL 1000
