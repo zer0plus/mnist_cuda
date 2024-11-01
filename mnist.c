@@ -1,7 +1,5 @@
+// INIT FORK: https://github.com/konrad-gajdus/miniMNIST-c/blob/main/nn.c
 #include "mnist.h"
-
-// https://x.com/konradgajdus/status/1837196363735482396
-// https://github.com/konrad-gajdus/miniMNIST-c/blob/main/nn.c
 
 
 void read_mnist_imgs(const char *filename, unsigned char **imgs, int *num_imgs) {

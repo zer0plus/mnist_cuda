@@ -10,6 +10,7 @@
 #include <thrust/extrema.h>
 #include "consts.cuh"
 #include <cuda.h>
+#include <cublas_v2.h>
 
 // The MNIST image/label file structure is as follows:
 //     [offset] [type] [value] [description]
@@ -324,13 +325,52 @@ __global__ void matrix_multiply_kernel(float *weights, float *inp, float *out, f
     }
 }
 
+static cublasHandle_t cublas_handle = NULL;
+
+void init_cublas() {
+    if (cublas_handle == NULL) {
+        CUBLAS_CHECK(cublasCreate(&cublas_handle));
+        CUBLAS_CHECK(cublasSetPointerMode(cublas_handle, CUBLAS_POINTER_MODE_HOST));
+    }
+}
+
+void cleanup_cublas() {
+    if (cublas_handle != NULL) {
+        CUBLAS_CHECK(cublasDestroy(cublas_handle));
+        cublas_handle = NULL;
+    }
+}
+
+void linear_cuda_cublas(GenericLayer *layer, float *inp, float *out) {
+    int block_size = 256;
+    int num_blocks = (layer->out_size + block_size - 1) / block_size;
+
+    copy_biases_kernel<<<num_blocks, block_size>>>(layer->biases, out, layer->out_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Perform matrix multiplication: out = weights * inp + out
+    float alpha = 1.0f;
+    float beta = 1.0f;
+    
+    CUBLAS_CHECK(cublasSgemv(cublas_handle, CUBLAS_OP_N,  // No transpose needed
+                          layer->out_size,        // Number of rows in weights
+                          layer->in_size,         // Number of columns in weights
+                          &alpha,
+                          layer->weights,         // Input matrix (weights)
+                          layer->out_size,        // Leading dimension of weights
+                          inp,                    // Input vector
+                          1,                      // Stride of input vector
+                          &beta,                  // Scale factor for biases
+                          out,                    // Output vector (contains biases)
+                          1));                    // Stride of output vector
+}
+
+
 void linear_cuda(GenericLayer *layer, float *inp, float *out) {
     int block_size = 256;
     int num_blocks = (layer->out_size + block_size - 1) / block_size;
     copy_biases_kernel<<<num_blocks, block_size>>>(layer->biases, out, layer->out_size);
     CUDA_CHECK(cudaGetLastError());
-    // DO YOU REALLY NEED TO CALL SYNC THIS EARLY, CHECK IT
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     float *d_partial_sums;
     CUDA_CHECK(cudaMalloc(&d_partial_sums, layer->out_size * sizeof(float)));
@@ -347,7 +387,6 @@ void linear_cuda(GenericLayer *layer, float *inp, float *out) {
     matrix_multiply_kernel<<<num_blocks_multiply, block_size>>>(layer->weights, inp, out, d_partial_sums, layer->in_size, layer->out_size);
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaFree(d_partial_sums));
 }
 
@@ -410,14 +449,12 @@ __global__ void relu_derivative_kernel(float *grad, float *out, int size) {
 __global__ void weight_gradient_kernel(float *weights, float *inp, 
     float *out_grad, int in_size, int out_size, float lr) {
     
-    // Use 2D thread blocks for better parallelism
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     
     __shared__ float shared_out_grad[TILE_SIZE];
     __shared__ float shared_inp[TILE_SIZE];
     
-    // Collaborative loading of input and output gradients
     if (threadIdx.x < blockDim.x && col < out_size) {
         shared_out_grad[threadIdx.x] = out_grad[col];
     }
@@ -493,51 +530,57 @@ void backward_cuda(GenericLayer *layer, float *inp, float *out_grad,
     CUDA_CHECK(cudaGetLastError());
 }
 
+void backward_cuda_cublas(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
+    static cublasHandle_t cublas_handle = NULL;
+    if (cublas_handle == NULL) {
+        CUBLAS_CHECK(cublasCreate(&cublas_handle));
+        CUBLAS_CHECK(cublasSetPointerMode(cublas_handle, CUBLAS_POINTER_MODE_HOST));
+    }
 
-// __global__ void backward_kernel(float *weights, float *biases, float *inp, float *out_grad, float *in_grad, int in_size, int out_size, float lr) {
-//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//     int tid = threadIdx.x;
-//     extern __shared__ float shared_out_grad[];
-//     if (tid < out_size) {
-//         shared_out_grad[tid] = out_grad[tid];
-//     }
-//     __syncthreads();
-
-//     if (idx < in_size) {
-//         float input_i = inp[idx];
-//         float *weight_row_start = &weights[idx * out_size];
-        
-//         if (in_grad) {
-//             float temp_grad = 0.0f;
-//             #pragma unroll
-//             for (int j = 0; j < out_size; j++) {
-//                 temp_grad += shared_out_grad[j] * weight_row_start[j];
-//                 weight_row_start[j] -= lr * (shared_out_grad[j] * input_i);
-//             }
-//             atomicAdd(&in_grad[idx], temp_grad);
-//         }
-//         else {
-//             #pragma unroll
-//             for (int j = 0; j < out_size; j++) {
-//                 weight_row_start[j] -= lr * (shared_out_grad[j] * input_i);
-//             }
-//         }
-//     }
-//     if (idx < out_size) {
-//         biases[idx] -= lr * shared_out_grad[idx];
-//     }
-// }
-// void backward_cuda(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
-//     int block_size = 256;
-//     int num_blocks_in = (layer->in_size + block_size - 1) / block_size;
-//     int num_blocks_out = (layer->out_size + block_size - 1) / block_size;
-//     int num_blocks = max(num_blocks_in, num_blocks_out);
-//     size_t shared_mem_size = layer->out_size * sizeof(float);
+    // Weight Gradient Update
+    // weights[in_size][out_size] -= lr * (inp[1][in_size]^T * out_grad[1][out_size])
+    float alpha = -lr;  // Negative lr because we want to subtract
+    float beta = 1.0f;  // Use 1.0 to update existing weights
     
-//     backward_kernel<<<num_blocks, block_size, shared_mem_size>>>(layer->weights, layer->biases, inp, out_grad, in_grad, layer->in_size, layer->out_size, lr);
-//     CUDA_CHECK(cudaGetLastError());
-//     CUDA_CHECK(cudaDeviceSynchronize());
-// }
+    CUBLAS_CHECK(cublasSgemm(cublas_handle, 
+                            CUBLAS_OP_N, CUBLAS_OP_T,
+                            layer->out_size,    // M: number of rows of output matrix
+                            layer->in_size,     // N: number of columns of output matrix
+                            1,                  // K: number of columns in inp and rows in out_grad
+                            &alpha,             
+                            out_grad,           // Matrix A: out_grad
+                            layer->out_size,    // Leading dimension of A
+                            inp,                // Matrix B: inp
+                            layer->in_size,     // Leading dimension of B
+                            &beta,              
+                            layer->weights,     // Matrix C: weights
+                            layer->out_size));  // Leading dimension of C
+
+    // Input Gradient Computation (if needed)
+    if (in_grad) {
+        alpha = 1.0f;
+        beta = 0.0f;
+        CUBLAS_CHECK(cublasSgemv(cublas_handle, 
+                                CUBLAS_OP_T,           // Transpose weights
+                                layer->out_size,       // Number of rows of weights
+                                layer->in_size,        // Number of columns of weights
+                                &alpha,
+                                layer->weights,        // Weight matrix
+                                layer->out_size,       // Leading dimension of weights
+                                out_grad,              // Vector to multiply with
+                                1,                     // Stride of out_grad
+                                &beta,
+                                in_grad,               // Result vector
+                                1));                   // Stride of in_grad
+    }
+
+    // Bias Update (keep as is)
+    int block_size = 256;
+    int num_blocks_out = (layer->out_size + block_size - 1) / block_size;
+    bias_update_kernel<<<num_blocks_out, block_size>>>(
+        layer->biases, out_grad, layer->out_size, lr);
+    CUDA_CHECK(cudaGetLastError());
+}
 
 __global__ void update_out_grad_kernel(float *out_grad, float *output, unsigned char *d_labels, int d_label_idx) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -546,7 +589,6 @@ __global__ void update_out_grad_kernel(float *out_grad, float *output, unsigned 
         out_grad[idx] = output[idx] - (idx == d_labels[d_label_idx]);
     }
 }
-
 
 void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_label_idx, float lr, float* final_out) {
     static float *d_final_output, *d_hidden_out, *d_out_grad, *d_hidden_grad;
@@ -565,7 +607,7 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     CUDA_CHECK(cudaMemset(d_hidden_grad, 0, HIDDEN_LAYER_SIZE * sizeof(float)));
 
     // Inp to Hidden layer fwd pass
-    linear_cuda(&net->hidden, inp, d_hidden_out);
+    linear_cuda_cublas(&net->hidden, inp, d_hidden_out);
 
     int block_size = 256;
     int num_blocks_hidden = (HIDDEN_LAYER_SIZE + block_size - 1) / block_size;
@@ -573,9 +615,8 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     CUDA_CHECK(cudaGetLastError());
 
     // Hidden to out layer fwd pass
-    linear_cuda(&net->output, d_hidden_out, d_final_output);
+    linear_cuda_cublas(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Compute out gradient
     int num_blocks_out = (OUTPUT_LAYER_SIZE + block_size - 1) / block_size;
@@ -592,15 +633,10 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     // hidden to output layer bwd pass
     backward_cuda(&net->hidden, inp, d_hidden_grad, NULL, lr);
     
-    CUDA_CHECK(cudaDeviceSynchronize());
-
     // float *final_output = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
     CUDA_CHECK(cudaMemcpy(final_out, d_final_output, OUTPUT_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-    
-    // return final_out;
 }
 
-// forward only 
 int forward(Network *net, float *inp, float *final_out) {
     static float *d_hidden_out, *d_final_output;
     static bool first_run = true;
@@ -610,14 +646,14 @@ int forward(Network *net, float *inp, float *final_out) {
         CUDA_CHECK(cudaMalloc(&d_hidden_out, HIDDEN_LAYER_SIZE * sizeof(float)));
         first_run = false;
     }
-    linear_cuda(&net->hidden, inp, d_hidden_out);
+    linear_cuda_cublas(&net->hidden, inp, d_hidden_out);
 
     int block_size = 256;
     int num_blocks = (HIDDEN_LAYER_SIZE + block_size - 1) / block_size;
     relu_kernel<<<num_blocks, block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
     CUDA_CHECK(cudaGetLastError());
     
-    linear_cuda(&net->output, d_hidden_out, d_final_output);
+    linear_cuda_cublas(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
 
     // float* final_out = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
@@ -642,11 +678,13 @@ int main() {
     clock_t start, end;
     double gpu_time_used;
 
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);  // Assume using device 0
-    printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
-    printf("Shared memory per block: %zu bytes\n", prop.sharedMemPerBlock);
-    printf("Warp size: %d\n", prop.warpSize);
+    init_cublas();
+
+    // cudaDeviceProp prop;
+    // cudaGetDeviceProperties(&prop, 0);  // Assume using device 0
+    // printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
+    // printf("Shared memory per block: %zu bytes\n", prop.sharedMemPerBlock);
+    // printf("Warp size: %d\n", prop.warpSize);
 
     srand(time(NULL));
 
@@ -710,7 +748,7 @@ int main() {
         printf("Epoch %d, Accuracy: %.2f%%, Avg Loss: %.4f, Time: %.2f seconds\n", 
             epoch + 1, (float)correct / test_size * 100, total_loss / train_size, gpu_time_used);
     }
-
+    cleanup_cublas();
     CUDA_CHECK(cudaFree(mnist_net.hidden.weights));
     CUDA_CHECK(cudaFree(mnist_net.hidden.biases));
     CUDA_CHECK(cudaFree(mnist_net.output.weights));

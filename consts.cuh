@@ -8,7 +8,7 @@
 #define HIDDEN_LAYER_SIZE 256
 #define OUTPUT_LAYER_SIZE 10
 #define LEARNING_RATE 0.0005f
-#define EPOCHS 2
+#define EPOCHS 1
 #define BATCH_SIZE 64
 #define TRAIN_SPLIT 0.8
 #define PRINT_INTERVAL 1000
@@ -27,6 +27,18 @@
             exit(EXIT_FAILURE); \
         } \
     } while(0)
+
+#define CUBLAS_CHECK(call) \
+    do { \
+        cublasStatus_t status = call; \
+        if (status != CUBLAS_STATUS_SUCCESS) { \
+            fprintf(stderr, "cuBLAS error at %s:%d: %d\n", __FILE__, __LINE__, \
+                status); \
+            cudaDeviceReset(); \
+            exit(EXIT_FAILURE); \
+            } \
+    } while(0)
+
 
 typedef struct {
     float *weights, *biases;
