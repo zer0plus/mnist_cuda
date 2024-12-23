@@ -96,7 +96,7 @@ void shuffle_data(unsigned char *imgs, unsigned char *labels, int n) {
 }
 
 
-void init_layer(GenericLayer *layer, int in_size, int out_size) {
+void init_layer(GenericLayer *layer, size_t in_size, size_t out_size) {
     size_t n = in_size * out_size;
     //to normally distribute our weights with rand values
     float scale = sqrtf(2.0f / in_size);
@@ -109,7 +109,7 @@ void init_layer(GenericLayer *layer, int in_size, int out_size) {
     layer->biases = (float *)calloc(out_size, sizeof(float)); //minim-MNIST only has biases for opt neurons
 
     // 'He' initialization is used to set the weights
-    for (int i = 0; i < n; i++) { // sets weights to a random value and scales using inp size
+    for (size_t i = 0; i < n; i++) { // sets weights to a random value and scales using inp size
         // layer->weights[i] = (5.0f - 0.5f) * 2 * scale;
         layer->weights[i] = ((float)rand() / RAND_MAX - 0.5f) * 2 * scale;
     }

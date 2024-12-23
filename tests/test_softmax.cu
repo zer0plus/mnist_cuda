@@ -9,21 +9,6 @@ void initialize_data(float *data, int size) {
     }
 }
 
-// void softmax(float *inp, int size) {
-//     float max = inp[0], sum = 0;
-
-//     for (int i = 1; i < size; i++) {
-//         if (inp[i] > max) {max = inp[i];}
-//     }
-//     for (int i = 0; i < size; i++) {
-//         inp[i] = expf(inp[i] - max);
-//         sum += inp[i];
-//     }
-//     for (int i = 0; i < size; i++) {
-//         inp[i] = inp[i] / sum;
-//     }
-// }
-
 int compare_arrays(float *a, float *b, int size) {
     for (int i = 0; i < size; i++) {
         if (abs(a[i] - b[i]) > 1e-5) {

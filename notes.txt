@@ -14,13 +14,15 @@ gcc -DRUN_MNIST_CPU -O3 -march=native -ffast-math mnist.o -o mnist -lm
  - mnist.cu: 
 nvcc -O3 -arch=sm_86 -rdc=true -c mnist.cu -o mnist_cuda.o
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA -c mnist.cu -o mnist_cuda.o
-nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand -lcuda
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand -lcuda -lcublas
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand -lcuda -lcublas
 
  - tests:
-nvcc -O3 -arch=sm_86 -rdc=true -DRUN_RELU_TEST -o test_relu test_relu.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
-nvcc -O3 -arch=sm_86 -rdc=true -DRUN_SOFTMAX_TEST -o test_softmax test_softmax.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
-nvcc -O3 -arch=sm_86 -rdc=true -DRUN_INIT_TEST -o test_init test_init.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
-nvcc -O3 -g -arch=sm_86 -rdc=true -DRUN_READ_TEST -o test_read test_read.cu ../mnist_cuda.o ../mnist.o -lcudadevrt
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_RELU_TEST -o test_relu test_relu.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_SOFTMAX_TEST -o test_softmax test_softmax.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_INIT_TEST -o test_init test_init.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_READ_TEST -o test_read test_read.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
+nvcc -O3 -g -arch=sm_86 -rdc=true -DRUN_LINEAR_TEST -o test_linear test_linear.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
 
 TODO:
 - compare gpu_naive vs ur faulty implementation and fix
@@ -28,3 +30,44 @@ TODO:
 - write resume pointers
 - plan out further optimizations
 - 
+
+nsys profiling::
+nsys profile -t cuda,cublas,nvtx --stats=true ./mnist_cuda
+
+NCU profiling cuda full:
+sudo /usr/local/cuda-12.2/bin/ncu --target-processes all mnist_cuda
+
+profiling specific kernels:
+sudo /usr/local/cuda-12.2/bin/ncu --target-processes all -k "forward_kernel" -k "backward_kernel" mnist_cuda
+
+listing all kernels in one program: 
+sudo /usr/local/cuda-12.2/bin/ncu --list-kernels mnist_cuda
+
+
+sudo /usr/local/cuda-12.2/bin/ncu --target-processes all -k "linear_cuda_cublas" mnist_cuda
+
+
+
+~~~~~~Lecture 8 - Perf checklist notes~~~~~~
+
+-------Perf Checklist-------
+
+- Coalesced Global Memory Access
+    - make sure all global memory access is contiguous, pretty basic but always make sure
+- Maximize occupancy
+- Understand if memory or compute bound
+- Minimize control divergence
+    - conditionals inside kernels with different workloads is BAD because one set of conditionals might be finished before the other.
+    - this causes threads in a WARP to wait for its slow neighbors, slowing down the whole WARP
+- Tiling of reused data
+- Privatization
+- Thread Coarsening
+    - doing more work in one thread
+    - example: if you were adding all elements of 2 matrices, instead of adding each element, add element i and i+1 in one thread cuasing huge improvemennt 
+- rewrite algo using better MATH
+
+
+USE MEMCPY ASYNC AND FIND OUT WHY AND WHEN TO 
+
+~~~~~~~~~~~~~~ Optim misc ~~~~~~~~~~~~~~
+- only initialize cublas handle once in the program

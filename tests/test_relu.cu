@@ -28,6 +28,7 @@ void initialize_data(float *data, int size) {
 int compare_arrays(float *a, float *b, int size) {
     for (int i = 0; i < size; i++) {
         if (abs(a[i] - b[i]) > 1e-5) {
+            printf("Mismatch at index %d: %f != %f\n", i, a[i], b[i]);
             return 0;
         }
     }
@@ -90,8 +91,11 @@ int main() {
     cudaEventCreate(&start_gpu);
     cudaEventCreate(&stop_gpu);
     cudaEventRecord(start_gpu);
-    relu_kernel<<<num_blocks, block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
-    relu_derivative_kernel<<<num_blocks, block_size>>>(d_hidden_derivative_relu, d_grad_relu, HIDDEN_LAYER_TEST_SIZE);
+    const int vector_size = 4;
+    const int vector_block_size = 256;
+    const int vector_grid_size = ((HIDDEN_LAYER_TEST_SIZE + vector_size - 1) / vector_size + vector_block_size - 1) / vector_block_size;
+    optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
+    // relu_kernel<<<num_blocks, block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
     cudaEventRecord(stop_gpu);
     cudaEventSynchronize(stop_gpu);
     float gpu_time = 0;
@@ -102,8 +106,8 @@ int main() {
     cudaEventCreate(&start_deriv_gpu);
     cudaEventCreate(&stop_deriv_gpu);
     cudaEventRecord(start_deriv_gpu);
-    relu_kernel<<<num_blocks, block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
-    relu_derivative_kernel<<<num_blocks, block_size>>>(d_hidden_derivative_relu, d_grad_relu, HIDDEN_LAYER_TEST_SIZE);
+    optimized_relu_derivative_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_derivative_relu, d_grad_relu, HIDDEN_LAYER_TEST_SIZE);
+    // relu_derivative_kernel<<<num_blocks, block_size>>>(d_hidden_derivative_relu, d_grad_relu, HIDDEN_LAYER_TEST_SIZE);
     cudaEventRecord(stop_deriv_gpu);
     cudaEventSynchronize(stop_deriv_gpu);
     float gpu_deriv_time = 0;

@@ -228,72 +228,72 @@ int main() {
     printf(" Speedup: %fx\n", cpu_time / gpu_time);
 
 
-    GenericLayer hidden = {0};
-    hidden.in_size = INPUT_LAYER_SIZE;
-    hidden.out_size = HIDDEN_LAYER_SIZE;
-    hidden.weights = (float *) malloc(INPUT_LAYER_SIZE * HIDDEN_LAYER_SIZE * sizeof(float));
-    hidden.biases = (float *) calloc(HIDDEN_LAYER_SIZE, sizeof(float));
+    // GenericLayer hidden = {0};
+    // hidden.in_size = INPUT_LAYER_SIZE;
+    // hidden.out_size = HIDDEN_LAYER_SIZE;
+    // hidden.weights = (float *) malloc(INPUT_LAYER_SIZE * HIDDEN_LAYER_SIZE * sizeof(float));
+    // hidden.biases = (float *) calloc(HIDDEN_LAYER_SIZE, sizeof(float));
 
-    GenericLayer d_hidden = {0};
-    d_hidden.in_size = INPUT_LAYER_SIZE;
-    d_hidden.out_size = HIDDEN_LAYER_SIZE;
-    cudaMalloc((void **) &d_hidden.weights, INPUT_LAYER_SIZE * HIDDEN_LAYER_SIZE * sizeof(float));
-    CUDA_CHECK(cudaMalloc((void **) &d_hidden.biases, HIDDEN_LAYER_SIZE * sizeof(float)));
-    cudaMemset(d_hidden.biases, 0, HIDDEN_LAYER_SIZE * sizeof(float));
+    // GenericLayer d_hidden = {0};
+    // d_hidden.in_size = INPUT_LAYER_SIZE;
+    // d_hidden.out_size = HIDDEN_LAYER_SIZE;
+    // cudaMalloc((void **) &d_hidden.weights, INPUT_LAYER_SIZE * HIDDEN_LAYER_SIZE * sizeof(float));
+    // CUDA_CHECK(cudaMalloc((void **) &d_hidden.biases, HIDDEN_LAYER_SIZE * sizeof(float)));
+    // cudaMemset(d_hidden.biases, 0, HIDDEN_LAYER_SIZE * sizeof(float));
 
-    float *h_hidden_out = (float *) malloc(cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float));
-    cudaEvent_t cpu_linear_start, cpu_linear_stop;
-    float cpu_linear_time;
-    cudaEventCreate(&cpu_linear_start);
-    cudaEventCreate(&cpu_linear_stop);
-    cudaEventRecord(cpu_linear_start);
-    linear(&hidden, h_imgs_cpu, h_hidden_out);
-    cudaEventRecord(cpu_linear_stop);
-    cudaEventSynchronize(cpu_linear_stop);
-    cudaEventElapsedTime(&cpu_linear_time, cpu_linear_start, cpu_linear_stop);
+    // float *h_hidden_out = (float *) malloc(cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float));
+    // cudaEvent_t cpu_linear_start, cpu_linear_stop;
+    // float cpu_linear_time;
+    // cudaEventCreate(&cpu_linear_start);
+    // cudaEventCreate(&cpu_linear_stop);
+    // cudaEventRecord(cpu_linear_start);
+    // linear(&hidden, h_imgs_cpu, h_hidden_out);
+    // cudaEventRecord(cpu_linear_stop);
+    // cudaEventSynchronize(cpu_linear_stop);
+    // cudaEventElapsedTime(&cpu_linear_time, cpu_linear_start, cpu_linear_stop);
 
-    float *d_hidden_out;
-    CUDA_CHECK(cudaMalloc((void **)&d_hidden_out, cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float)));
+    // float *d_hidden_out;
+    // CUDA_CHECK(cudaMalloc((void **)&d_hidden_out, cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float)));
 
-    cudaEvent_t gpu_linear_start, gpu_linear_stop;
-    float gpu_linear_time;
-    cudaEventCreate(&gpu_linear_start);
-    cudaEventCreate(&gpu_linear_stop);
-    cudaEventRecord(gpu_linear_start);
-    linear_cuda(&d_hidden, gpu_data.imgs, d_hidden_out);
-    cudaEventRecord(gpu_linear_stop);
-    cudaEventSynchronize(gpu_linear_stop);
-    cudaEventElapsedTime(&gpu_linear_time, gpu_linear_start, gpu_linear_stop);
+    // cudaEvent_t gpu_linear_start, gpu_linear_stop;
+    // float gpu_linear_time;
+    // cudaEventCreate(&gpu_linear_start);
+    // cudaEventCreate(&gpu_linear_stop);
+    // cudaEventRecord(gpu_linear_start);
+    // linear_cuda(&d_hidden, gpu_data.imgs, d_hidden_out);
+    // cudaEventRecord(gpu_linear_stop);
+    // cudaEventSynchronize(gpu_linear_stop);
+    // cudaEventElapsedTime(&gpu_linear_time, gpu_linear_start, gpu_linear_stop);
 
-    float *h_hidden_out_cuda = (float*) malloc(cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float));
-    cudaMemcpy(h_hidden_out_cuda, d_hidden_out, cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    // float *h_hidden_out_cuda = (float*) malloc(cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float));
+    // cudaMemcpy(h_hidden_out_cuda, d_hidden_out, cpu_data.num_imgs * HIDDEN_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
 
-    int result_linear = compare_arrays(h_hidden_out, h_hidden_out_cuda, cpu_data.num_imgs * HIDDEN_LAYER_SIZE);
-    if (result_linear) {
-        printf("\nLinear Test Passed: CPU and CUDA results match.\n");
-    } else {
-        printf("\nLinear Test Failed: CPU and CUDA results do not match.\n");
-    }
-    printf(" CPU time: %f ms\n", cpu_linear_time);
-    printf(" GPU time: %f ms\n", gpu_linear_time);
-    printf(" Speedup: %fx\n", cpu_linear_time / gpu_linear_time);
+    // int result_linear = compare_arrays(h_hidden_out, h_hidden_out_cuda, cpu_data.num_imgs * HIDDEN_LAYER_SIZE);
+    // if (result_linear) {
+    //     printf("\nLinear Test Passed: CPU and CUDA results match.\n");
+    // } else {
+    //     printf("\nLinear Test Failed: CPU and CUDA results do not match.\n");
+    // }
+    // printf(" CPU time: %f ms\n", cpu_linear_time);
+    // printf(" GPU time: %f ms\n", gpu_linear_time);
+    // printf(" Speedup: %fx\n", cpu_linear_time / gpu_linear_time);
 
-    test_backward();
-    test_update_out_grad();
+    // test_backward();
+    // test_update_out_grad();
     
 
     cudaFree(gpu_data.imgs);
     cudaFree(gpu_data.labels);
-    cudaFree(d_hidden.weights);
-    cudaFree(d_hidden.biases);
+    // cudaFree(d_hidden.weights);
+    // cudaFree(d_hidden.biases);
     free(cpu_data.imgs);
     free(cpu_data.labels);
     free(h_imgs_gpu);
     free(h_imgs_cpu);
     free(h_labels_gpu);
-    free(h_hidden_out);
-    free(h_hidden_out_cuda);
-    free(hidden.weights);
-    free(hidden.biases);
+    // free(h_hidden_out);
+    // free(h_hidden_out_cuda);
+    // free(hidden.weights);
+    // free(hidden.biases);
 }
 #endif

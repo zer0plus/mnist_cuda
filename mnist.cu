@@ -325,6 +325,30 @@ __global__ void matrix_multiply_kernel(float *weights, float *inp, float *out, f
     }
 }
 
+void linear_cuda(GenericLayer *layer, float *inp, float *out) {
+    int block_size = 256;
+    int num_blocks = (layer->out_size + block_size - 1) / block_size;
+    copy_biases_kernel<<<num_blocks, block_size>>>(layer->biases, out, layer->out_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    float *d_partial_sums;
+    CUDA_CHECK(cudaMalloc(&d_partial_sums, layer->out_size * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_partial_sums, 0, layer->out_size * sizeof(float)));
+
+    dim3 block_size_dot(16, 16);
+    dim3 grid_size_dot((layer->in_size + block_size_dot.x - 1) / block_size_dot.x,
+                       (layer->out_size + block_size_dot.y - 1) / block_size_dot.y);
+
+    dot_product_kernel<<<grid_size_dot, block_size_dot>>>(layer->weights, inp, d_partial_sums, layer->in_size, layer->out_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    int num_blocks_multiply = (layer->out_size + block_size - 1) / block_size;
+    matrix_multiply_kernel<<<num_blocks_multiply, block_size>>>(layer->weights, inp, out, d_partial_sums, layer->in_size, layer->out_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaFree(d_partial_sums));
+}
+
 static cublasHandle_t cublas_handle = NULL;
 
 void init_cublas() {
@@ -366,69 +390,188 @@ void linear_cuda_cublas(GenericLayer *layer, float *inp, float *out) {
 }
 
 
-void linear_cuda(GenericLayer *layer, float *inp, float *out) {
-    int block_size = 256;
-    int num_blocks = (layer->out_size + block_size - 1) / block_size;
-    copy_biases_kernel<<<num_blocks, block_size>>>(layer->biases, out, layer->out_size);
-    CUDA_CHECK(cudaGetLastError());
+#define WARP_SIZE 32
+#define FULL_MASK 0xffffffff
+#define BLOCK_SIZE 256
+#define VECTOR_SIZE 4
 
-    float *d_partial_sums;
-    CUDA_CHECK(cudaMalloc(&d_partial_sums, layer->out_size * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_partial_sums, 0, layer->out_size * sizeof(float)));
-
-    dim3 block_size_dot(16, 16);
-    dim3 grid_size_dot((layer->in_size + block_size_dot.x - 1) / block_size_dot.x,
-                       (layer->out_size + block_size_dot.y - 1) / block_size_dot.y);
-
-    dot_product_kernel<<<grid_size_dot, block_size_dot>>>(layer->weights, inp, d_partial_sums, layer->in_size, layer->out_size);
-    CUDA_CHECK(cudaGetLastError());
-
-    int num_blocks_multiply = (layer->out_size + block_size - 1) / block_size;
-    matrix_multiply_kernel<<<num_blocks_multiply, block_size>>>(layer->weights, inp, out, d_partial_sums, layer->in_size, layer->out_size);
-    CUDA_CHECK(cudaGetLastError());
-
-    CUDA_CHECK(cudaFree(d_partial_sums));
+__device__ static float atomicMax(float *address, float val) {
+  int *address_as_i = (int *)address;
+  int old = *address_as_i, assumed;
+  do {
+    assumed = old;
+    old = ::atomicCAS(address_as_i, assumed,
+                      __float_as_int(::fmaxf(val, __int_as_float(assumed))));
+  } while (assumed != old);
+  return __int_as_float(old);
 }
 
-__global__ void exp_subtract_sum_kernel(float *inp, int size, float *max_val, float *sum) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        inp[idx] = expf(inp[idx] - *max_val);
-        atomicAdd(sum, inp[idx]);
+__global__ void optimized_softmax_kernel(float* __restrict__ inp, const int size) {
+    // Calculate elements per block instead of using full size
+    const int elements_per_block = BLOCK_SIZE * VECTOR_SIZE;
+    extern __shared__ float smem[];
+    float* row_shared = smem;
+    float* reduction_shared = &smem[elements_per_block];
+    
+    const int tid = threadIdx.x;
+    const int lane_id = tid % WARP_SIZE;
+    const int global_id = blockIdx.x * blockDim.x + tid;
+    
+    // Calculate elements per thread based on block size
+    const int elements_per_thread = (elements_per_block + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int vector_elements = elements_per_thread / VECTOR_SIZE;
+    float reg[128];
+    
+    // Initialize reduction value
+    if (tid == 0) {
+        reduction_shared[0] = -INFINITY;
     }
-}
-
-__global__ void divide_kernel(float *inp, int size, float *sum) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        inp[idx] /= *sum;
+    
+    float local_max = -INFINITY;
+    
+    // Load data using float4 and find local max
+    if (global_id * VECTOR_SIZE < size) {
+        for (int i = 0; i < vector_elements; i++) {
+            const int idx = global_id * VECTOR_SIZE + i * BLOCK_SIZE * VECTOR_SIZE;
+            if (idx < size) {
+                float4* vector_ptr = reinterpret_cast<float4*>(inp + idx);
+                float4 elements = *vector_ptr;
+                
+                reg[i*4] = elements.x;
+                reg[i*4 + 1] = elements.y;
+                reg[i*4 + 2] = elements.z;
+                reg[i*4 + 3] = elements.w;
+                
+                local_max = fmaxf(local_max, elements.x);
+                local_max = fmaxf(local_max, elements.y);
+                local_max = fmaxf(local_max, elements.z);
+                local_max = fmaxf(local_max, elements.w);
+            }
+        }
+    }
+    
+    // Warp-level reduction for max
+    #pragma unroll
+    for (int offset = WARP_SIZE/2; offset > 0; offset /= 2) {
+        local_max = fmaxf(local_max, __shfl_down_sync(FULL_MASK, local_max, offset));
+    }
+    
+    // First thread in each warp updates shared memory
+    if (lane_id == 0) {
+        atomicMax(reduction_shared, local_max);
+    }
+    __syncthreads();
+    
+    // Get the global maximum
+    const float max_val = reduction_shared[0];
+    
+    // Reset for sum reduction
+    if (tid == 0) {
+        reduction_shared[0] = 0.0f;
+    }
+    __syncthreads();
+    
+    // Compute exp and local sum
+    float local_sum = 0.0f;
+    if (global_id * VECTOR_SIZE < size) {
+        #pragma unroll
+        for (int i = 0; i < vector_elements; i++) {
+            const int idx = global_id * VECTOR_SIZE + i * BLOCK_SIZE * VECTOR_SIZE;
+            if (idx < size) {
+                float4 output;
+                output.x = expf(reg[i*4] - max_val);
+                output.y = expf(reg[i*4 + 1] - max_val);
+                output.z = expf(reg[i*4 + 2] - max_val);
+                output.w = expf(reg[i*4 + 3] - max_val);
+                
+                reinterpret_cast<float4*>(row_shared + idx)[0] = output;
+                
+                local_sum += output.x + output.y + output.z + output.w;
+            }
+        }
+    }
+    
+    // Warp-level reduction for sum
+    #pragma unroll
+    for (int offset = WARP_SIZE/2; offset > 0; offset /= 2) {
+        local_sum += __shfl_down_sync(FULL_MASK, local_sum, offset);
+    }
+    
+    if (lane_id == 0) {
+        atomicAdd(reduction_shared, local_sum);
+    }
+    __syncthreads();
+    
+    // Final division and store
+    const float final_sum = reduction_shared[0];
+    if (global_id * VECTOR_SIZE < size) {
+        #pragma unroll
+        for (int i = 0; i < vector_elements; i++) {
+            const int idx = global_id * VECTOR_SIZE + i * BLOCK_SIZE * VECTOR_SIZE;
+            if (idx < size) {
+                float4 output;
+                output.x = row_shared[idx] / final_sum;
+                output.y = row_shared[idx + 1] / final_sum;
+                output.z = row_shared[idx + 2] / final_sum;
+                output.w = row_shared[idx + 3] / final_sum;
+                
+                reinterpret_cast<float4*>(inp + idx)[0] = output;
+            }
+        }
     }
 }
 
 void softmax_cuda(float *d_inp, int size) {
-    float *d_max, *d_sum;
-
-    CUDA_CHECK(cudaMalloc(&d_max, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_sum, sizeof(float)));
-
-    // Find max value
-    thrust::device_ptr<float> dev_ptr(d_inp);
-    thrust::device_ptr<float> max_ptr = thrust::max_element(dev_ptr, dev_ptr + size);
-    CUDA_CHECK(cudaMemcpy(d_max, thrust::raw_pointer_cast(max_ptr), sizeof(float), cudaMemcpyDeviceToDevice));
-
-    CUDA_CHECK(cudaMemset(d_sum, 0, sizeof(float)));
+    const int block_size = BLOCK_SIZE;
+    // Calculate shared memory per block, not for entire array
+    const int elements_per_block = block_size * VECTOR_SIZE;
+    const int shared_mem_size = (elements_per_block + 1) * sizeof(float);
+    const int num_blocks = (size + elements_per_block - 1) / elements_per_block;
     
-    int block_size = 256;
-    int num_blocks = (size + block_size - 1) / block_size;
-    exp_subtract_sum_kernel<<<num_blocks, block_size>>>(d_inp, size, d_max, d_sum);
+    optimized_softmax_kernel<<<num_blocks, block_size, shared_mem_size>>>(d_inp, size);
     CUDA_CHECK(cudaGetLastError());
-    
-    divide_kernel<<<num_blocks, block_size>>>(d_inp, size, d_sum);
-    CUDA_CHECK(cudaGetLastError());
-
-    CUDA_CHECK(cudaFree(d_sum));
-    CUDA_CHECK(cudaFree(d_max));
 }
+
+
+// __global__ void exp_subtract_sum_kernel(float *inp, int size, float *max_val, float *sum) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         inp[idx] = expf(inp[idx] - *max_val);
+//         atomicAdd(sum, inp[idx]);
+//     }
+// }
+
+// __global__ void divide_kernel(float *inp, int size, float *sum) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         inp[idx] /= *sum;
+//     }
+// }
+
+// void softmax_cuda(float *d_inp, int size) {
+//     float *d_max, *d_sum;
+
+//     CUDA_CHECK(cudaMalloc(&d_max, sizeof(float)));
+//     CUDA_CHECK(cudaMalloc(&d_sum, sizeof(float)));
+
+//     // Find max value
+//     thrust::device_ptr<float> dev_ptr(d_inp);
+//     thrust::device_ptr<float> max_ptr = thrust::max_element(dev_ptr, dev_ptr + size);
+//     CUDA_CHECK(cudaMemcpy(d_max, thrust::raw_pointer_cast(max_ptr), sizeof(float), cudaMemcpyDeviceToDevice));
+
+//     CUDA_CHECK(cudaMemset(d_sum, 0, sizeof(float)));
+    
+//     int block_size = 256;
+//     int num_blocks = (size + block_size - 1) / block_size;
+//     exp_subtract_sum_kernel<<<num_blocks, block_size>>>(d_inp, size, d_max, d_sum);
+//     CUDA_CHECK(cudaGetLastError());
+    
+//     divide_kernel<<<num_blocks, block_size>>>(d_inp, size, d_sum);
+//     CUDA_CHECK(cudaGetLastError());
+
+//     CUDA_CHECK(cudaFree(d_sum));
+//     CUDA_CHECK(cudaFree(d_max));
+// }
 
 __global__ void relu_kernel(float *out, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -438,11 +581,65 @@ __global__ void relu_kernel(float *out, int size) {
     }
 }
 
+__global__ void optimized_relu_kernel(float* __restrict__ data, int size) {
+    // Calculate global thread index
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int vector_size = 4;
+    const int vector_idx = tid * vector_size;
+    
+    // Process 4 elements per thread if within bounds
+    if (vector_idx < size - 3) {
+        float4* data_ptr = reinterpret_cast<float4*>(data + vector_idx);
+        float4 elements = *data_ptr;
+        
+        // Using ternary operators for consistency with derivative kernel
+        elements.x = (elements.x > 0.0f) ? elements.x : 0.0f;
+        elements.y = (elements.y > 0.0f) ? elements.y : 0.0f;
+        elements.z = (elements.z > 0.0f) ? elements.z : 0.0f;
+        elements.w = (elements.w > 0.0f) ? elements.w : 0.0f;
+        
+        *data_ptr = elements;
+    }
+    // Handle remaining elements individually
+    else if (tid < size) {
+        data[tid] = (data[tid] > 0.0f) ? data[tid] : 0.0f;
+    }
+}
+
+
 __global__ void relu_derivative_kernel(float *grad, float *out, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < size) {
         grad[idx] *= out[idx] > 0 ? 1 : 0;
+    }
+}
+
+__global__ void optimized_relu_derivative_kernel(float *grad, float *input, int size) {
+    // Calculate global thread index
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int vector_size = 4;
+    const int vector_idx = tid * vector_size;
+    
+    // Process 4 elements per thread if within bounds
+    if (vector_idx < size - 3) {
+        float4* grad_ptr = reinterpret_cast<float4*>(grad + vector_idx);
+        float4* input_ptr = reinterpret_cast<float4*>(input + vector_idx);
+        
+        float4 grad_elements = *grad_ptr;
+        float4 input_elements = *input_ptr;
+        
+        // Apply ReLU derivative
+        grad_elements.x *= (input_elements.x > 0.0f) ? 1.0f : 0.0f;
+        grad_elements.y *= (input_elements.y > 0.0f) ? 1.0f : 0.0f;
+        grad_elements.z *= (input_elements.z > 0.0f) ? 1.0f : 0.0f;
+        grad_elements.w *= (input_elements.w > 0.0f) ? 1.0f : 0.0f;
+        
+        *grad_ptr = grad_elements;
+    }
+    // Handle remaining elements individually
+    else if (tid < size) {
+        grad[tid] *= (input[tid] > 0.0f) ? 1.0f : 0.0f;
     }
 }
 
@@ -607,15 +804,19 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     CUDA_CHECK(cudaMemset(d_hidden_grad, 0, HIDDEN_LAYER_SIZE * sizeof(float)));
 
     // Inp to Hidden layer fwd pass
-    linear_cuda_cublas(&net->hidden, inp, d_hidden_out);
+    linear_cuda(&net->hidden, inp, d_hidden_out);
 
     int block_size = 256;
     int num_blocks_hidden = (HIDDEN_LAYER_SIZE + block_size - 1) / block_size;
-    relu_kernel<<<num_blocks_hidden, block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
+    // relu_kernel<<<num_blocks_hidden, block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
+    int vector_block_size = 256;
+    int vector_grid_size = (HIDDEN_LAYER_SIZE/4 + vector_block_size - 1) / vector_block_size;
+    optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
+    
     CUDA_CHECK(cudaGetLastError());
 
     // Hidden to out layer fwd pass
-    linear_cuda_cublas(&net->output, d_hidden_out, d_final_output);
+    linear_cuda(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
 
     // Compute out gradient
@@ -627,7 +828,8 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     backward_cuda(&net->output, d_hidden_out, d_out_grad, d_hidden_grad, lr);
 
     // Backprop through ReLU(derivative) Activation
-    relu_derivative_kernel<<<num_blocks_hidden, block_size>>>(d_hidden_grad, d_hidden_out, HIDDEN_LAYER_SIZE);
+    optimized_relu_derivative_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_grad, d_hidden_out, HIDDEN_LAYER_SIZE);
+    // relu_derivative_kernel<<<num_blocks_hidden, block_size>>>(d_hidden_grad, d_hidden_out, HIDDEN_LAYER_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
     // hidden to output layer bwd pass
@@ -646,14 +848,17 @@ int forward(Network *net, float *inp, float *final_out) {
         CUDA_CHECK(cudaMalloc(&d_hidden_out, HIDDEN_LAYER_SIZE * sizeof(float)));
         first_run = false;
     }
-    linear_cuda_cublas(&net->hidden, inp, d_hidden_out);
+    linear_cuda(&net->hidden, inp, d_hidden_out);
 
     int block_size = 256;
     int num_blocks = (HIDDEN_LAYER_SIZE + block_size - 1) / block_size;
-    relu_kernel<<<num_blocks, block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
+    // relu_kernel<<<num_blocks, block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
+    int vector_block_size = 256;
+    int vector_grid_size = (HIDDEN_LAYER_SIZE/4 + vector_block_size - 1) / vector_block_size;
+    optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
     CUDA_CHECK(cudaGetLastError());
     
-    linear_cuda_cublas(&net->output, d_hidden_out, d_final_output);
+    linear_cuda(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
 
     // float* final_out = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
