@@ -43,6 +43,7 @@ __global__ void shuffle_naive_kernel(float *imgs, unsigned char *labels, int *sh
 __global__ void optimized_relu_kernel(float* __restrict__ data, const int size);
 __global__ void optimized_relu_derivative_kernel(float *grad, float *input, int size);
 __global__ void optimized_softmax_kernel(float* __restrict__ inp, const int size);
+void relu_cuda(float *d_data, int size);
 
 void print_device_tensor(const char* tensor_name, float* d_ptr, int shape_size, int num_elements_to_print);
 

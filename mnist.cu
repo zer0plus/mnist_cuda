@@ -39,7 +39,7 @@ void print_device_tensor(const char* tensor_name, float* d_ptr, int shape_size, 
     
     // Print tensor information with both logical shape and actual elements
     printf("%s: dtype=float32, shape=(%d,), allocated_elements=%zu, size_in_bytes=%zu\n", 
-           tensor_name, shape_size, actual_elements, actual_size);
+        tensor_name, shape_size, actual_elements, actual_size);
     
     // Print elements
     printf("First %d elements: [", num_elements_to_print);
@@ -54,8 +54,6 @@ void print_device_tensor(const char* tensor_name, float* d_ptr, int shape_size, 
     free(h_data);
 }
 
-
-// Kernel to initialize random number generators
 __global__ void init_curand_states(curandState *states, unsigned long seed, size_t total_weights) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_weights) {
@@ -96,14 +94,12 @@ void init_layer_cuda(GenericLayer *layer, int in_size, int out_size) {
     CUDA_CHECK(cudaGetLastError());
     
     init_weights_kernel<<<num_blocks, block_size>>>(layer->weights, total_weights, scale, d_states);
-    CUDA_CHECK(cudaGetLastError());
     
+    CUDA_CHECK(cudaGetLastError());    
     CUDA_CHECK(cudaDeviceSynchronize());
-
     CUDA_CHECK(cudaMemset(layer->biases, 0, out_size * sizeof(float)));
     CUDA_CHECK(cudaFree(d_states));
 }
-
 
 __global__ void normalize_imgs_kernel(unsigned char* raw_imgs, float* d_normalized_imgs, int total_pixels) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -166,7 +162,6 @@ void read_mnist_imgs_cuda(const char *filename, float **d_imgs, int *num_imgs) {
 
     fclose(file);
 
-    // Allocate device memory for raw and normalized images
     // float *d_imgs;
     unsigned char *d_raw_imgs;
     CUDA_CHECK(cudaMalloc((void **)&d_raw_imgs, total_pixels * sizeof(unsigned char)));
@@ -235,7 +230,6 @@ __global__ void swap_pixels_kernel(float *imgs, int i, int j, int img_size) {
         imgs[j * img_size + pixel_idx] = tmp;
     }
 }
-
 
 __global__ void shuffle_kernel(float *imgs, unsigned char *labels, int *shuffled_indices, int num_imgs, int img_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -337,7 +331,7 @@ void linear_cuda(GenericLayer *layer, float *inp, float *out) {
 
     dim3 block_size_dot(16, 16);
     dim3 grid_size_dot((layer->in_size + block_size_dot.x - 1) / block_size_dot.x,
-                       (layer->out_size + block_size_dot.y - 1) / block_size_dot.y);
+                    (layer->out_size + block_size_dot.y - 1) / block_size_dot.y);
 
     dot_product_kernel<<<grid_size_dot, block_size_dot>>>(layer->weights, inp, d_partial_sums, layer->in_size, layer->out_size);
     CUDA_CHECK(cudaGetLastError());
@@ -350,7 +344,6 @@ void linear_cuda(GenericLayer *layer, float *inp, float *out) {
 }
 
 static cublasHandle_t cublas_handle = NULL;
-
 void init_cublas() {
     if (cublas_handle == NULL) {
         CUBLAS_CHECK(cublasCreate(&cublas_handle));
@@ -376,35 +369,31 @@ void linear_cuda_cublas(GenericLayer *layer, float *inp, float *out) {
     float alpha = 1.0f;
     float beta = 1.0f;
     
-    CUBLAS_CHECK(cublasSgemv(cublas_handle, CUBLAS_OP_N,  // No transpose needed
-                          layer->out_size,        // Number of rows in weights
-                          layer->in_size,         // Number of columns in weights
+    CUBLAS_CHECK(cublasSgemv(cublas_handle, CUBLAS_OP_N,    // No transpose needed
+                          layer->out_size,                  // Number of rows in weights
+                          layer->in_size,                   // Number of columns in weights
                           &alpha,
-                          layer->weights,         // Input matrix (weights)
-                          layer->out_size,        // Leading dimension of weights
-                          inp,                    // Input vector
-                          1,                      // Stride of input vector
-                          &beta,                  // Scale factor for biases
-                          out,                    // Output vector (contains biases)
-                          1));                    // Stride of output vector
+                          layer->weights,                   // Input matrix (weights)
+                          layer->out_size,                  // Leading dimension of weights
+                          inp,                              // Input vector
+                          1,                                // Stride of input vector
+                          &beta,                            // Scale factor for biases
+                          out,                              // Output vector (contains biases)
+                          1));                              // Stride of output vector
 }
 
-
-#define WARP_SIZE 32
-#define FULL_MASK 0xffffffff
-#define BLOCK_SIZE 256
-#define VECTOR_SIZE 4
 
 __device__ static float atomicMax(float *address, float val) {
-  int *address_as_i = (int *)address;
-  int old = *address_as_i, assumed;
-  do {
-    assumed = old;
-    old = ::atomicCAS(address_as_i, assumed,
-                      __float_as_int(::fmaxf(val, __int_as_float(assumed))));
-  } while (assumed != old);
-  return __int_as_float(old);
+    int *address_as_i = (int *)address;
+    int old = *address_as_i, assumed;
+    do {
+        assumed = old;
+        old = ::atomicCAS(address_as_i, assumed,
+                    __float_as_int(::fmaxf(val, __int_as_float(assumed))));
+    } while (assumed != old);
+    return __int_as_float(old);
 }
+
 
 __global__ void optimized_softmax_kernel(float* __restrict__ inp, const int size) {
     // Calculate elements per block instead of using full size
@@ -521,9 +510,9 @@ __global__ void optimized_softmax_kernel(float* __restrict__ inp, const int size
     }
 }
 
+
 void softmax_cuda(float *d_inp, int size) {
     const int block_size = BLOCK_SIZE;
-    // Calculate shared memory per block, not for entire array
     const int elements_per_block = block_size * VECTOR_SIZE;
     const int shared_mem_size = (elements_per_block + 1) * sizeof(float);
     const int num_blocks = (size + elements_per_block - 1) / elements_per_block;
@@ -533,46 +522,6 @@ void softmax_cuda(float *d_inp, int size) {
 }
 
 
-// __global__ void exp_subtract_sum_kernel(float *inp, int size, float *max_val, float *sum) {
-//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//     if (idx < size) {
-//         inp[idx] = expf(inp[idx] - *max_val);
-//         atomicAdd(sum, inp[idx]);
-//     }
-// }
-
-// __global__ void divide_kernel(float *inp, int size, float *sum) {
-//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//     if (idx < size) {
-//         inp[idx] /= *sum;
-//     }
-// }
-
-// void softmax_cuda(float *d_inp, int size) {
-//     float *d_max, *d_sum;
-
-//     CUDA_CHECK(cudaMalloc(&d_max, sizeof(float)));
-//     CUDA_CHECK(cudaMalloc(&d_sum, sizeof(float)));
-
-//     // Find max value
-//     thrust::device_ptr<float> dev_ptr(d_inp);
-//     thrust::device_ptr<float> max_ptr = thrust::max_element(dev_ptr, dev_ptr + size);
-//     CUDA_CHECK(cudaMemcpy(d_max, thrust::raw_pointer_cast(max_ptr), sizeof(float), cudaMemcpyDeviceToDevice));
-
-//     CUDA_CHECK(cudaMemset(d_sum, 0, sizeof(float)));
-    
-//     int block_size = 256;
-//     int num_blocks = (size + block_size - 1) / block_size;
-//     exp_subtract_sum_kernel<<<num_blocks, block_size>>>(d_inp, size, d_max, d_sum);
-//     CUDA_CHECK(cudaGetLastError());
-    
-//     divide_kernel<<<num_blocks, block_size>>>(d_inp, size, d_sum);
-//     CUDA_CHECK(cudaGetLastError());
-
-//     CUDA_CHECK(cudaFree(d_sum));
-//     CUDA_CHECK(cudaFree(d_max));
-// }
-
 __global__ void relu_kernel(float *out, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -581,29 +530,41 @@ __global__ void relu_kernel(float *out, int size) {
     }
 }
 
-__global__ void optimized_relu_kernel(float* __restrict__ data, int size) {
-    // Calculate global thread index
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int vector_size = 4;
-    const int vector_idx = tid * vector_size;
+
+__global__ void optimized_relu_kernel(float* __restrict__ data, const int size) {
+    const int tid = threadIdx.x;
+    const int global_id = blockIdx.x * blockDim.x + tid;
+    const int vector_idx = global_id * VECTOR_SIZE;
     
-    // Process 4 elements per thread if within bounds
-    if (vector_idx < size - 3) {
-        float4* data_ptr = reinterpret_cast<float4*>(data + vector_idx);
-        float4 elements = *data_ptr;
+    // Process 4 elements per thread using float4
+    if (vector_idx + VECTOR_SIZE <= size) {
+        float4* vector_ptr = reinterpret_cast<float4*>(data + vector_idx);
+        float4 elements = *vector_ptr;
         
-        // Using ternary operators for consistency with derivative kernel
+        // Process in registers
         elements.x = (elements.x > 0.0f) ? elements.x : 0.0f;
         elements.y = (elements.y > 0.0f) ? elements.y : 0.0f;
         elements.z = (elements.z > 0.0f) ? elements.z : 0.0f;
         elements.w = (elements.w > 0.0f) ? elements.w : 0.0f;
         
-        *data_ptr = elements;
+        // Write back
+        *vector_ptr = elements;
     }
-    // Handle remaining elements individually
-    else if (tid < size) {
-        data[tid] = (data[tid] > 0.0f) ? data[tid] : 0.0f;
+    // Handle remaining elements
+    else if (vector_idx < size) {
+        for (int i = vector_idx; i < min(vector_idx + VECTOR_SIZE, size); i++) {
+            data[i] = (data[i] > 0.0f) ? data[i] : 0.0f;
+        }
     }
+}
+
+
+void relu_cuda(float *d_data, int size) {
+    const int block_size = BLOCK_SIZE;
+    const int num_blocks = (size + (block_size * VECTOR_SIZE) - 1) / (block_size * VECTOR_SIZE);
+    
+    optimized_relu_kernel<<<num_blocks, block_size>>>(d_data, size);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 
@@ -689,6 +650,7 @@ __global__ void input_gradient_kernel(float *weights, float *out_grad,
         atomicAdd(&in_grad[row], grad_sum);
     }
 }
+
 __global__ void bias_update_kernel(float *biases, float *out_grad, 
     int out_size, float lr) {
     
@@ -811,8 +773,8 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     // relu_kernel<<<num_blocks_hidden, block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
     int vector_block_size = 256;
     int vector_grid_size = (HIDDEN_LAYER_SIZE/4 + vector_block_size - 1) / vector_block_size;
-    optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
-    
+    // optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
+    relu_cuda(d_hidden_out, HIDDEN_LAYER_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
     // Hidden to out layer fwd pass
@@ -838,6 +800,7 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     // float *final_output = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
     CUDA_CHECK(cudaMemcpy(final_out, d_final_output, OUTPUT_LAYER_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
 }
+
 
 int forward(Network *net, float *inp, float *final_out) {
     static float *d_hidden_out, *d_final_output;
@@ -871,9 +834,9 @@ int forward(Network *net, float *inp, float *final_out) {
             ans = i;
         }
     }
-    // free(final_out);
     return ans;
 }
+
 
 #ifdef RUN_MNIST_CUDA
 int main() {
@@ -885,6 +848,7 @@ int main() {
 
     init_cublas();
 
+    // Hardware Debug info //
     // cudaDeviceProp prop;
     // cudaGetDeviceProperties(&prop, 0);  // Assume using device 0
     // printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
@@ -895,8 +859,6 @@ int main() {
 
     init_layer_cuda(&mnist_net.hidden, INPUT_LAYER_SIZE, HIDDEN_LAYER_SIZE);
     init_layer_cuda(&mnist_net.output, HIDDEN_LAYER_SIZE, OUTPUT_LAYER_SIZE);
-
-    // UP UNTIL HERE IT WORKS!
 
     // imgs & labels are directly loaded to device
     read_mnist_imgs_cuda(TRAIN_IMG_PATH, &data.imgs, &data.num_imgs);

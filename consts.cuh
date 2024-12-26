@@ -8,11 +8,16 @@
 #define HIDDEN_LAYER_SIZE 256
 #define OUTPUT_LAYER_SIZE 10
 #define LEARNING_RATE 0.0005f
-#define EPOCHS 1
+#define EPOCHS 10
 #define BATCH_SIZE 64
 #define TRAIN_SPLIT 0.8
 #define PRINT_INTERVAL 1000
 #define TILE_SIZE 32
+
+#define WARP_SIZE 32
+#define FULL_MASK 0xffffffff
+#define BLOCK_SIZE 256
+#define VECTOR_SIZE 4
 
 #define TRAIN_IMG_PATH "./data/train-images.idx3-ubyte"
 #define TRAIN_LABEL_PATH "./data/train-labels.idx1-ubyte"

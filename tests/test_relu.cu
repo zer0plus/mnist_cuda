@@ -3,9 +3,42 @@
 #include <cuda_runtime.h>
 #include "../kernels.cuh"
 #include "../consts.cuh"
+#include <cudnn.h>
 
 #define HIDDEN_LAYER_TEST_SIZE (HIDDEN_LAYER_SIZE * 1024 * 1024)
 #define GRAD_LAYER_TEST_SIZE (HIDDEN_LAYER_SIZE * 1024 * 1024)
+
+void relu_cudnn(float* data, int size, cudnnHandle_t cudnnHandle) {
+    cudnnActivationDescriptor_t activationDesc;
+    cudnnCreateActivationDescriptor(&activationDesc);
+    cudnnSetActivationDescriptor(activationDesc, 
+                                CUDNN_ACTIVATION_RELU,
+                                CUDNN_PROPAGATE_NAN, 
+                                0.0);
+
+    cudnnTensorDescriptor_t tensorDesc;
+    cudnnCreateTensorDescriptor(&tensorDesc);
+    // Assuming 1D array, treat as NCHW with N=1, C=1, H=1, W=size
+    cudnnSetTensor4dDescriptor(tensorDesc,
+                            CUDNN_TENSOR_NCHW,
+                            CUDNN_DATA_FLOAT,
+                            1, 1, 1, size);
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    
+    cudnnActivationForward(cudnnHandle,
+                        activationDesc,
+                        &alpha,
+                        tensorDesc,
+                        data,
+                        &beta,
+                        tensorDesc,
+                        data);
+
+    cudnnDestroyActivationDescriptor(activationDesc);
+    cudnnDestroyTensorDescriptor(tensorDesc);
+}
 
 void relu_cpu(float *out, int size) {
     for (int i = 0; i < size; i++) {
@@ -21,7 +54,7 @@ void relu_derivative_cpu(float *grad, float *out, int size) {
 
 void initialize_data(float *data, int size) {
     for (int i = 0; i < size; i++) {
-        data[i] = (float)(rand() % 20 - 10) / 2.0f; // Random values between -5 and 5
+        data[i] = (float)(rand() % 20 - 10) / 2.0f;
     }
 }
 
@@ -38,6 +71,8 @@ int compare_arrays(float *a, float *b, int size) {
 
 #ifdef RUN_RELU_TEST
 int main() {
+    cudnnHandle_t cudnnHandle;
+    cudnnCreate(&cudnnHandle);
     printf("\nReLU Test with data size: %d \n", HIDDEN_LAYER_TEST_SIZE);
     int block_size = 256;
     int num_blocks = (HIDDEN_LAYER_TEST_SIZE + block_size - 1) / block_size;
@@ -57,7 +92,7 @@ int main() {
     initialize_data(h_hidden_derivative_cpu, HIDDEN_LAYER_TEST_SIZE);
     initialize_data(h_grad_cpu, GRAD_LAYER_TEST_SIZE);
 
-    // Allocate and copy data to GPU
+    // Alloc && cpy to device
     cudaMalloc((void **)&d_hidden_relu, HIDDEN_LAYER_TEST_SIZE * sizeof(float));
     cudaMalloc((void **)&d_hidden_derivative_relu, HIDDEN_LAYER_TEST_SIZE * sizeof(float));
     cudaMalloc((void **)&d_grad_relu, GRAD_LAYER_TEST_SIZE * sizeof(float));
@@ -87,14 +122,16 @@ int main() {
     cudaEventElapsedTime(&cpu_deriv_time, start_deriv_cpu, stop_deriv_cpu);
 
     // relu gpu
+    const int vector_size = 4;
+    const int vector_block_size = 256;
+    const int vector_grid_size = ((HIDDEN_LAYER_TEST_SIZE + vector_size - 1) / vector_size + vector_block_size - 1) / vector_block_size;
     cudaEvent_t start_gpu, stop_gpu;
     cudaEventCreate(&start_gpu);
     cudaEventCreate(&stop_gpu);
     cudaEventRecord(start_gpu);
-    const int vector_size = 4;
-    const int vector_block_size = 256;
-    const int vector_grid_size = ((HIDDEN_LAYER_TEST_SIZE + vector_size - 1) / vector_size + vector_block_size - 1) / vector_block_size;
-    optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
+    // relu_cuda(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
+    relu_cudnn(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE, cudnnHandle);
+    // optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
     // relu_kernel<<<num_blocks, block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
     cudaEventRecord(stop_gpu);
     cudaEventSynchronize(stop_gpu);
@@ -157,7 +194,7 @@ int main() {
     cudaEventDestroy(start_deriv_gpu);
     cudaEventDestroy(stop_gpu);
     cudaEventDestroy(stop_deriv_gpu);
-
+    cudnnDestroy(cudnnHandle);
     return 0;
 }
 #endif
