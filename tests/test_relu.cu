@@ -5,9 +5,6 @@
 #include "../consts.cuh"
 #include <cudnn.h>
 
-#define HIDDEN_LAYER_TEST_SIZE (HIDDEN_LAYER_SIZE * 1024 * 1024)
-#define GRAD_LAYER_TEST_SIZE (HIDDEN_LAYER_SIZE * 1024 * 1024)
-
 void relu_cudnn(float* data, int size, cudnnHandle_t cudnnHandle) {
     cudnnActivationDescriptor_t activationDesc;
     cudnnCreateActivationDescriptor(&activationDesc);
@@ -18,7 +15,6 @@ void relu_cudnn(float* data, int size, cudnnHandle_t cudnnHandle) {
 
     cudnnTensorDescriptor_t tensorDesc;
     cudnnCreateTensorDescriptor(&tensorDesc);
-    // Assuming 1D array, treat as NCHW with N=1, C=1, H=1, W=size
     cudnnSetTensor4dDescriptor(tensorDesc,
                             CUDNN_TENSOR_NCHW,
                             CUDNN_DATA_FLOAT,
@@ -60,141 +56,130 @@ void initialize_data(float *data, int size) {
 
 int compare_arrays(float *a, float *b, int size) {
     for (int i = 0; i < size; i++) {
-        if (abs(a[i] - b[i]) > 1e-5) {
-            printf("Mismatch at index %d: %f != %f\n", i, a[i], b[i]);
+        if (fabs(a[i] - b[i]) > 1e-5) {
             return 0;
         }
     }
     return 1;
 }
 
-
-#ifdef RUN_RELU_TEST
-int main() {
+void run_test(int size) {
     cudnnHandle_t cudnnHandle;
     cudnnCreate(&cudnnHandle);
-    printf("\nReLU Test with data size: %d \n", HIDDEN_LAYER_TEST_SIZE);
-    int block_size = 256;
-    int num_blocks = (HIDDEN_LAYER_TEST_SIZE + block_size - 1) / block_size;
-    float *h_hidden_cpu = (float *)malloc(HIDDEN_LAYER_TEST_SIZE * sizeof(float));
-    float *h_hidden_cuda = (float *)malloc(HIDDEN_LAYER_TEST_SIZE * sizeof(float));
-    float *h_hidden_derivative_cpu = (float *)malloc(HIDDEN_LAYER_TEST_SIZE * sizeof(float));
-    float *h_hidden_derivative_cuda = (float *)malloc(HIDDEN_LAYER_TEST_SIZE * sizeof(float));
-    float *h_grad_cpu = (float *)malloc(GRAD_LAYER_TEST_SIZE * sizeof(float));
-    float *h_grad_cuda = (float *)malloc(GRAD_LAYER_TEST_SIZE * sizeof(float));
+
+    // Allocate host memory
+    float *h_input = (float*)malloc(size * sizeof(float));
+    float *h_output_cpu = (float*)malloc(size * sizeof(float));
+    float *h_output_gpu = (float*)malloc(size * sizeof(float));
+    float *h_grad_cpu = (float*)malloc(size * sizeof(float));
+    float *h_grad_gpu = (float*)malloc(size * sizeof(float));
+    float *h_grad_deriv_cpu = (float*)malloc(size * sizeof(float));
+    float *h_grad_deriv_gpu = (float*)malloc(size * sizeof(float));
+
+    // Initialize data
+    initialize_data(h_input, size);
+    initialize_data(h_grad_cpu, size);
+    memcpy(h_grad_deriv_cpu, h_grad_cpu, size * sizeof(float));
+
+    // Allocate device memory
+    float *d_input, *d_output, *d_grad;
+    cudaMalloc((void**)&d_input, size * sizeof(float));
+    cudaMalloc((void**)&d_output, size * sizeof(float));
+    cudaMalloc((void**)&d_grad, size * sizeof(float));
+
+    // Copy data to device
+    cudaMemcpy(d_input, h_input, size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_grad, h_grad_cpu, size * sizeof(float), cudaMemcpyHostToDevice);
+
+    // CPU Forward Pass
+    memcpy(h_output_cpu, h_input, size * sizeof(float));
+    cudaEvent_t start, stop;
+    float cpu_time, gpu_time;
     
-    float *d_hidden_relu;
-    float *d_hidden_derivative_relu;
-    float *d_grad_relu;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    relu_cpu(h_output_cpu, size);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&cpu_time, start, stop);
 
-    srand(42);
-    initialize_data(h_hidden_cpu, HIDDEN_LAYER_TEST_SIZE);
-    initialize_data(h_hidden_derivative_cpu, HIDDEN_LAYER_TEST_SIZE);
-    initialize_data(h_grad_cpu, GRAD_LAYER_TEST_SIZE);
+    // GPU Forward Pass
+    cudaMemcpy(d_output, h_input, size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaEventRecord(start);
+    relu_cuda(d_output, size);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&gpu_time, start, stop);
+    cudaMemcpy(h_output_gpu, d_output, size * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Alloc && cpy to device
-    cudaMalloc((void **)&d_hidden_relu, HIDDEN_LAYER_TEST_SIZE * sizeof(float));
-    cudaMalloc((void **)&d_hidden_derivative_relu, HIDDEN_LAYER_TEST_SIZE * sizeof(float));
-    cudaMalloc((void **)&d_grad_relu, GRAD_LAYER_TEST_SIZE * sizeof(float));
-    cudaMemcpy(d_hidden_relu, h_hidden_cpu, HIDDEN_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_hidden_derivative_relu, h_hidden_derivative_cpu, HIDDEN_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_grad_relu, h_grad_cpu, GRAD_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    // Forward Pass Validation
+    int forward_valid = compare_arrays(h_output_cpu, h_output_gpu, size);
 
-    // relu cpu
-    cudaEvent_t start_cpu, stop_cpu, start_deriv_cpu, stop_deriv_cpu;
-    cudaEventCreate(&start_cpu);
-    cudaEventCreate(&stop_cpu);
-    cudaEventRecord(start_cpu);
-    relu_cpu(h_hidden_cpu, HIDDEN_LAYER_TEST_SIZE);
-    cudaEventRecord(stop_cpu);
-    cudaEventSynchronize(stop_cpu);
-    float cpu_time = 0;
-    cudaEventElapsedTime(&cpu_time, start_cpu, stop_cpu);
+    // CPU Derivative Pass
+    float cpu_deriv_time;
+    cudaEventRecord(start);
+    relu_derivative_cpu(h_grad_deriv_cpu, h_output_cpu, size);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&cpu_deriv_time, start, stop);
 
-    // relu deriv cpu
-    cudaEventCreate(&start_deriv_cpu);
-    cudaEventCreate(&stop_deriv_cpu);
-    cudaEventRecord(start_deriv_cpu);
-    relu_derivative_cpu(h_hidden_derivative_cpu, h_grad_cpu, HIDDEN_LAYER_TEST_SIZE);
-    cudaEventRecord(stop_deriv_cpu);
-    cudaEventSynchronize(stop_deriv_cpu);
-    float cpu_deriv_time = 0;
-    cudaEventElapsedTime(&cpu_deriv_time, start_deriv_cpu, stop_deriv_cpu);
-
-    // relu gpu
-    const int vector_size = 4;
-    const int vector_block_size = 256;
-    const int vector_grid_size = ((HIDDEN_LAYER_TEST_SIZE + vector_size - 1) / vector_size + vector_block_size - 1) / vector_block_size;
-    cudaEvent_t start_gpu, stop_gpu;
-    cudaEventCreate(&start_gpu);
-    cudaEventCreate(&stop_gpu);
-    cudaEventRecord(start_gpu);
-    // relu_cuda(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
-    relu_cudnn(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE, cudnnHandle);
-    // optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
-    // relu_kernel<<<num_blocks, block_size>>>(d_hidden_relu, HIDDEN_LAYER_TEST_SIZE);
-    cudaEventRecord(stop_gpu);
-    cudaEventSynchronize(stop_gpu);
-    float gpu_time = 0;
-    cudaEventElapsedTime(&gpu_time, start_gpu, stop_gpu);
-
-    // relu deriv gpu
-    cudaEvent_t start_deriv_gpu, stop_deriv_gpu;
-    cudaEventCreate(&start_deriv_gpu);
-    cudaEventCreate(&stop_deriv_gpu);
-    cudaEventRecord(start_deriv_gpu);
-    optimized_relu_derivative_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_derivative_relu, d_grad_relu, HIDDEN_LAYER_TEST_SIZE);
-    // relu_derivative_kernel<<<num_blocks, block_size>>>(d_hidden_derivative_relu, d_grad_relu, HIDDEN_LAYER_TEST_SIZE);
-    cudaEventRecord(stop_deriv_gpu);
-    cudaEventSynchronize(stop_deriv_gpu);
-    float gpu_deriv_time = 0;
-    cudaEventElapsedTime(&gpu_deriv_time, start_deriv_gpu, stop_deriv_gpu);
-
-    // Copy results back to host
-    cudaMemcpy(h_hidden_cuda, d_hidden_relu, HIDDEN_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_hidden_derivative_cuda, d_hidden_derivative_relu, HIDDEN_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-
-    // Compare results
-    int result = compare_arrays(h_hidden_cpu, h_hidden_cuda, HIDDEN_LAYER_TEST_SIZE);
-    if (result) {
-        printf("\nReLU Test Passed: CPU and CUDA results match.\n");
-    } else {
-        printf("\nReLU Test Failed: CPU and CUDA results do not match.\n");
-    }
-
-    printf("CPU time: %f ms\n", cpu_time);
-    printf("GPU time: %f ms\n", gpu_time);
-    printf("Speedup: %fx\n", cpu_time / gpu_time);
+    // GPU Derivative Pass
+    float gpu_deriv_time;
+    const int block_size = 256;
+    const int num_blocks = (size + block_size - 1) / block_size;
     
-    int result2 = compare_arrays(h_hidden_derivative_cpu, h_hidden_derivative_cuda, HIDDEN_LAYER_TEST_SIZE);
-    if (result2) {
-        printf("\nReLU Derivative Test Passed: CPU and CUDA results match.\n");
-    } else {
-        printf("\nReLU Derivative Test Failed: CPU and CUDA results do not match.\n");
-    }
-    printf("CPU time: %f ms\n", cpu_deriv_time);
-    printf("GPU time: %f ms\n", gpu_deriv_time);
-    printf("Speedup: %fx\n", cpu_deriv_time / gpu_deriv_time);
+    cudaEventRecord(start);
+    optimized_relu_derivative_kernel<<<num_blocks, block_size>>>(d_grad, d_output, size);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&gpu_deriv_time, start, stop);
+    cudaMemcpy(h_grad_deriv_gpu, d_grad, size * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Derivative Validation
+    int deriv_valid = compare_arrays(h_grad_deriv_cpu, h_grad_deriv_gpu, size);
+
+    // Structured Output
+    printf("RELU_RESULTS:\n");
+    printf("InputSize: %d\n", size);
+    printf("Forward_CPU_Time: %.4f\n", cpu_time);
+    printf("Forward_GPU_Time: %.4f\n", gpu_time);
+    printf("Forward_Speedup: %.2f\n", cpu_time / gpu_time);
+    printf("Forward_Valid: %d\n", forward_valid);
+    printf("Derivative_CPU_Time: %.4f\n", cpu_deriv_time);
+    printf("Derivative_GPU_Time: %.4f\n", gpu_deriv_time);
+    printf("Derivative_Speedup: %.2f\n", cpu_deriv_time / gpu_deriv_time);
+    printf("Derivative_Valid: %d\n", deriv_valid);
+    printf("END_RESULTS\n");
 
     // Cleanup
-    free(h_hidden_cpu);
-    free(h_hidden_cuda);
-    free(h_hidden_derivative_cpu);
-    free(h_hidden_derivative_cuda);
+    free(h_input);
+    free(h_output_cpu);
+    free(h_output_gpu);
     free(h_grad_cpu);
-    free(h_grad_cuda);
-    cudaFree(d_hidden_relu);
-    cudaFree(d_hidden_derivative_relu);
-    cudaFree(d_grad_relu);
-    cudaEventDestroy(start_cpu);
-    cudaEventDestroy(start_deriv_cpu);
-    cudaEventDestroy(stop_cpu);
-    cudaEventDestroy(stop_deriv_cpu);
-    cudaEventDestroy(start_gpu);
-    cudaEventDestroy(start_deriv_gpu);
-    cudaEventDestroy(stop_gpu);
-    cudaEventDestroy(stop_deriv_gpu);
+    free(h_grad_gpu);
+    free(h_grad_deriv_cpu);
+    free(h_grad_deriv_gpu);
+    cudaFree(d_input);
+    cudaFree(d_output);
+    cudaFree(d_grad);
     cudnnDestroy(cudnnHandle);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+}
+
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <input_size>\n", argv[0]);
+        return 1;
+    }
+
+    int size = atoi(argv[1]);
+    if (size <= 0) {
+        fprintf(stderr, "Invalid input size: %d\n", size);
+        return 1;
+    }
+
+    run_test(size);
     return 0;
 }
-#endif
