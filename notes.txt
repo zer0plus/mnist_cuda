@@ -14,12 +14,12 @@ nvcc -O3 -arch=sm_86 -rdc=true -c mnist.cu -o mnist_cuda.o
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA -c mnist.cu -o mnist_cuda.o
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand -lcuda -lcublas -lcudnn
 
- - tests:
+ - tests (add -g for cuda-gdb):
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_RELU_TEST -o test_relu test_relu.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas -lcudnn
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_SOFTMAX_TEST -o test_softmax test_softmax.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_INIT_TEST -o test_init test_init.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
 nvcc -O3 -arch=sm_86 -rdc=true -DRUN_READ_TEST -o test_read test_read.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
-nvcc -O3 -g -arch=sm_86 -rdc=true -DRUN_LINEAR_TEST -o test_linear test_linear.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_LINEAR_TEST -o test_linear test_linear.cu ../mnist_cuda.o ../mnist.o -lcudadevrt -lcurand -lcuda -lcublas
 
 nsys profiling::
 nsys profile -t cuda,cublas,nvtx --stats=true ./mnist_cuda

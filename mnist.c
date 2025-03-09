@@ -1,7 +1,6 @@
 // INIT FORK: https://github.com/konrad-gajdus/miniMNIST-c/blob/main/nn.c
 #include "mnist.h"
 
-
 void read_mnist_imgs(const char *filename, unsigned char **imgs, int *num_imgs) {
     FILE *file = fopen(filename, "rb");
     if (!file) exit(1);
@@ -37,7 +36,6 @@ void read_mnist_imgs(const char *filename, unsigned char **imgs, int *num_imgs) 
 
     fclose(file);
 }
-
 
 void read_mnist_labels(const char *filename, unsigned char **labels, int *num_labels) {
     FILE *file = fopen(filename, "rb");
@@ -114,6 +112,8 @@ void init_layer(GenericLayer *layer, size_t in_size, size_t out_size) {
         layer->weights[i] = ((float)rand() / RAND_MAX - 0.5f) * 2 * scale;
     }
 }
+
+
 void print_host_tensor(const char* tensor_name, float* h_ptr, int shape_size, int num_elements_to_print) {
     // Get actual size in bytes and calculate number of elements
     size_t actual_elements = sizeof(*h_ptr) * shape_size;  // This gives us total bytes allocated
@@ -160,7 +160,6 @@ void linear(GenericLayer *layer, float *inp, float *out) {
     }
 }
 
-
 void backward(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
     
     // go through the input layer
@@ -184,7 +183,6 @@ void backward(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, 
         layer->biases[i] -= lr * out_grad[i];
     }
 }
-
 
 float* train_mnist(Network *net, float *inp, int label, float lr) {
     static float final_output[OUTPUT_LAYER_SIZE];
@@ -242,6 +240,7 @@ int inference(Network *net, float *inp) {
     }
     return ans;
 }
+
 
 #ifdef RUN_MNIST_CPU
 int main() {

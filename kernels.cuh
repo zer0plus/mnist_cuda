@@ -13,6 +13,8 @@
 #include <thrust/extrema.h>
 #include "consts.cuh"
 
+void init_cublas();
+void cleanup_cublas();
 //Tested
 void init_layer_cuda(GenericLayer *layer, int in_size, int out_size);
 __global__ void init_curand_states(curandState *states, unsigned long seed, size_t total_weights);

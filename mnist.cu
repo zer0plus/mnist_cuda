@@ -364,6 +364,7 @@ void linear_cuda_cublas(GenericLayer *layer, float *inp, float *out) {
 
     copy_biases_kernel<<<num_blocks, block_size>>>(layer->biases, out, layer->out_size);
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize()); // Ensure biases are copied before proceeding
 
     // Perform matrix multiplication: out = weights * inp + out
     float alpha = 1.0f;
@@ -393,7 +394,6 @@ __device__ static float atomicMax(float *address, float val) {
     } while (assumed != old);
     return __int_as_float(old);
 }
-
 
 __global__ void optimized_softmax_kernel(float* __restrict__ inp, const int size) {
     // Calculate elements per block instead of using full size
@@ -510,7 +510,6 @@ __global__ void optimized_softmax_kernel(float* __restrict__ inp, const int size
     }
 }
 
-
 void softmax_cuda(float *d_inp, int size) {
     const int block_size = BLOCK_SIZE;
     const int elements_per_block = block_size * VECTOR_SIZE;
@@ -529,7 +528,6 @@ __global__ void relu_kernel(float *out, int size) {
         out[idx] = out[idx] > 0 ? out[idx] : 0;
     }
 }
-
 
 __global__ void optimized_relu_kernel(float* __restrict__ data, const int size) {
     const int tid = threadIdx.x;
@@ -557,7 +555,6 @@ __global__ void optimized_relu_kernel(float* __restrict__ data, const int size) 
         }
     }
 }
-
 
 void relu_cuda(float *d_data, int size) {
     const int block_size = BLOCK_SIZE;
@@ -690,7 +687,7 @@ void backward_cuda(GenericLayer *layer, float *inp, float *out_grad,
 }
 
 void backward_cuda_cublas(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr) {
-    static cublasHandle_t cublas_handle = NULL;
+    // static cublasHandle_t cublas_handle = NULL;
     if (cublas_handle == NULL) {
         CUBLAS_CHECK(cublasCreate(&cublas_handle));
         CUBLAS_CHECK(cublasSetPointerMode(cublas_handle, CUBLAS_POINTER_MODE_HOST));
@@ -766,7 +763,7 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     CUDA_CHECK(cudaMemset(d_hidden_grad, 0, HIDDEN_LAYER_SIZE * sizeof(float)));
 
     // Inp to Hidden layer fwd pass
-    linear_cuda(&net->hidden, inp, d_hidden_out);
+    linear_cuda_cublas(&net->hidden, inp, d_hidden_out);
 
     int block_size = 256;
     int num_blocks_hidden = (HIDDEN_LAYER_SIZE + block_size - 1) / block_size;
@@ -778,7 +775,7 @@ void train_mnist_cuda(Network *net, float *inp, unsigned char *d_labels, int d_l
     CUDA_CHECK(cudaGetLastError());
 
     // Hidden to out layer fwd pass
-    linear_cuda(&net->output, d_hidden_out, d_final_output);
+    linear_cuda_cublas(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
 
     // Compute out gradient
@@ -811,7 +808,7 @@ int forward(Network *net, float *inp, float *final_out) {
         CUDA_CHECK(cudaMalloc(&d_hidden_out, HIDDEN_LAYER_SIZE * sizeof(float)));
         first_run = false;
     }
-    linear_cuda(&net->hidden, inp, d_hidden_out);
+    linear_cuda_cublas(&net->hidden, inp, d_hidden_out);
 
     int block_size = 256;
     int num_blocks = (HIDDEN_LAYER_SIZE + block_size - 1) / block_size;
@@ -821,7 +818,7 @@ int forward(Network *net, float *inp, float *final_out) {
     optimized_relu_kernel<<<vector_grid_size, vector_block_size>>>(d_hidden_out, HIDDEN_LAYER_SIZE);
     CUDA_CHECK(cudaGetLastError());
     
-    linear_cuda(&net->output, d_hidden_out, d_final_output);
+    linear_cuda_cublas(&net->output, d_hidden_out, d_final_output);
     softmax_cuda(d_final_output, OUTPUT_LAYER_SIZE);
 
     // float* final_out = (float *)malloc(OUTPUT_LAYER_SIZE * sizeof(float));
@@ -836,7 +833,6 @@ int forward(Network *net, float *inp, float *final_out) {
     }
     return ans;
 }
-
 
 #ifdef RUN_MNIST_CUDA
 int main() {

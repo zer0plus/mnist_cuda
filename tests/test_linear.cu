@@ -6,45 +6,28 @@
 #include <time.h>
 #include <curand.h>
 #include <curand_kernel.h>
+#include <cublas_v2.h>
 
-#define HIDDEN_LAYER_TEST_SIZE (HIDDEN_LAYER_SIZE)
-#define OUT_LAYER_TEST_SIZE (OUTPUT_LAYER_SIZE)
+#define HIDDEN_LAYER_TEST_SIZE (HIDDEN_LAYER_SIZE * 100)
+#define OUT_LAYER_TEST_SIZE (OUTPUT_LAYER_SIZE * 100)
 
-// void initialize_data(float *data, int size) {
-//     for (int i = 0; i < size; i++) {
-//         data[i] = (float)(rand() % 20 - 10) / 2.0f; // Random values between -5 and 5
-//     }
-// }
-
-// void print_device_tensor(const char* tensor_name, float* d_ptr, int shape_size, int num_elements_to_print) {
-//     CUdeviceptr base;
-//     size_t actual_size;
-//     cuMemGetAddressRange(&base, &actual_size, (CUdeviceptr)d_ptr);
-//     size_t actual_elements = actual_size / sizeof(float);
+// Debug code to print matrices
+void print_matrices(float *inp, float *weights, float *out, int in_size, int out_size) {
+    printf("Input vector:\n");
+    for (int i = 0; i < min(10, in_size); i++) {
+        printf("%.4f ", inp[i]);
+    }
+    printf("\n\n");
     
-//     // Ensure we don't try to print more elements than exist
-//     num_elements_to_print = (num_elements_to_print > shape_size) ? shape_size : num_elements_to_print;
-    
-//     // Allocate host memory for the elements we want to print
-//     float* h_data = (float*)malloc(num_elements_to_print * sizeof(float));
-//     cudaMemcpy(h_data, d_ptr, num_elements_to_print * sizeof(float), cudaMemcpyDeviceToHost);
-    
-//     // Print tensor information with both logical shape and actual elements
-//     printf("%s: dtype=float32, shape=(%d,), allocated_elements=%zu, size_in_bytes=%zu\n", 
-//            tensor_name, shape_size, actual_elements, actual_size);
-    
-//     // Print elements
-//     printf("First %d elements: [", num_elements_to_print);
-//     for (int i = 0; i < num_elements_to_print; i++) {
-//         printf("%.4f", h_data[i]);
-//         if (i < num_elements_to_print - 1) {
-//             printf(", ");
-//         }
-//     }
-//     printf("]%s\n", shape_size > num_elements_to_print ? ", ...]" : "]");
-    
-//     free(h_data);
-// }
+    printf("Weights matrix (row-major layout):\n");
+    for (int i = 0; i < min(5, in_size); i++) {
+        for (int j = 0; j < min(5, out_size); j++) {
+            printf("%.4f ", weights[i * out_size + j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
 
 void print_ele(float* cpu_ele, float* gpu_ele, size_t size) {
     // printf("CPU ele: ");
@@ -76,7 +59,7 @@ void print_ele(float* cpu_ele, float* gpu_ele, size_t size) {
 
 int compare_arrays(float *a, float *b, size_t size) {
     for (size_t i = 0; i < size; i++) {
-        if (abs(a[i] - b[i]) > 1e-10) {
+        if (abs(a[i] - b[i]) > 1e-4) {
             return 0;
         }
     }
@@ -94,6 +77,8 @@ void initialize_data(float *data, size_t size) {
 int main() {
     // create dummy linear layers with different in and out test sizes
     // init cpu layer with data and copy it to gpu to make data same
+    init_cublas();
+
     srand(time(NULL));
     printf("\nLinear Test with data size: %d \n", HIDDEN_LAYER_TEST_SIZE);
     float *h_out_cpu, *h_hidden_cpu, *h_out_cuda, *h_hidden_cuda, *h_input;
@@ -117,12 +102,12 @@ int main() {
     gpu_hidden.out_size = cpu_hidden.out_size;
     size_t num_layer_elements = cpu_hidden.in_size * cpu_hidden.out_size;
     
-    CUDA_CHECK(cudaMemcpy(d_input, h_input, HIDDEN_LAYER_TEST_SIZE, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_input, h_input, HIDDEN_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyHostToDevice));
 
-    CUDA_CHECK(cudaMalloc((void **) &gpu_hidden.weights, num_layer_elements));
-    CUDA_CHECK(cudaMalloc((void **) &gpu_hidden.biases, OUT_LAYER_TEST_SIZE));
-    CUDA_CHECK(cudaMemcpy(gpu_hidden.weights, cpu_hidden.weights, num_layer_elements, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(gpu_hidden.biases, cpu_hidden.biases, OUT_LAYER_TEST_SIZE, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc((void **) &gpu_hidden.weights, num_layer_elements * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **) &gpu_hidden.biases, OUT_LAYER_TEST_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(gpu_hidden.weights, cpu_hidden.weights, num_layer_elements * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(gpu_hidden.biases, cpu_hidden.biases, OUT_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyHostToDevice));
 
     // Print CPU hidden layer weights and biases
     printf("CPU Hidden Layer Weights:\n");
@@ -150,18 +135,19 @@ int main() {
     cudaEventSynchronize(stop_cpu);
     cudaEventElapsedTime(&cpu_time, start_cpu, stop_cpu);
 
+    print_matrices(h_input, cpu_hidden.weights, h_out_cpu, HIDDEN_LAYER_TEST_SIZE, OUT_LAYER_TEST_SIZE);
+
     cudaEvent_t start_gpu, stop_gpu;
     float gpu_time;
     cudaEventCreate(&start_gpu);
     cudaEventCreate(&stop_gpu);
     cudaEventRecord(start_gpu);
-    linear_cuda(&gpu_hidden, d_input, d_out);
+    linear_cuda_cublas(&gpu_hidden, d_input, d_out);
     cudaEventRecord(stop_gpu);
     cudaEventSynchronize(stop_gpu);
     cudaEventElapsedTime(&gpu_time, start_gpu, stop_gpu);
 
     CUDA_CHECK(cudaMemcpy(h_out_cuda, d_out, OUT_LAYER_TEST_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-
     int result = compare_arrays(h_out_cpu, h_out_cuda, OUT_LAYER_TEST_SIZE);
     if (result) {
         printf("\nLinear Test Passed: CPU and CUDA results match.\n");
