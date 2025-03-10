@@ -45,54 +45,62 @@ def format_size(size, for_plot=False):
     """
     Format memory size in bytes to a human-readable string
     """
-    # Calculate actual memory usage (size * sizeof(float))
-    actual_bytes = size * 4
+    # Calculate memory usage (size * sizeof(float))
+    memory_bytes = size * 4
     
-    if actual_bytes < 1024:  # Less than 1 KB
+    if memory_bytes < 1024:  # Less than 1 KB
         if for_plot:
-            return f"{actual_bytes} B"
-        return f"{actual_bytes} bytes"
-    elif actual_bytes < 1024 * 1024:  # Less than 1 MB
-        kb = actual_bytes / 1024
+            return f"{memory_bytes} B"
+        return f"{memory_bytes} bytes"
+    elif memory_bytes < 1024 * 1024:  # Less than 1 MB
+        kb = memory_bytes / 1024
         if for_plot:
             return f"{kb:.1f} KB"
-        return f"{actual_bytes} bytes ({kb:.1f} KB)"
-    elif actual_bytes < 1024 * 1024 * 1024:  # Less than 1 GB
-        mb = actual_bytes / (1024 * 1024)
+        return f"{memory_bytes} bytes ({kb:.1f} KB)"
+    elif memory_bytes < 1024 * 1024 * 1024:  # Less than 1 GB
+        mb = memory_bytes / (1024 * 1024)
         if for_plot:
             return f"{mb:.1f} MB"
-        return f"{actual_bytes} bytes ({mb:.1f} MB)"
+        return f"{memory_bytes} bytes ({mb:.1f} MB)"
     else:
-        gb = actual_bytes / (1024 * 1024 * 1024)
+        gb = memory_bytes / (1024 * 1024 * 1024)
         if for_plot:
             return f"{gb:.2f} GB"
-        return f"{actual_bytes} bytes ({gb:.2f} GB)"
+        return f"{memory_bytes} bytes ({gb:.2f} GB)"
 
-def format_matrix_size(size, for_plot=False):
-    """Format matrix size for plots"""
+def format_matrix_size(in_size, out_size, for_plot=False):
+    """Format matrix dimensions for plots"""
     if for_plot:
-        return f"{size}×{size}"
-    return f"{size}×{size} ({format_size(size*size, False)} matrix)"
+        return f"{in_size}×{out_size}"
+    matrix_elements = in_size * out_size
+    return f"{in_size}×{out_size} ({format_size(matrix_elements, False)})"
 
-def run_test(size):
+def format_xtick(in_size, out_size):
     """
-    Run the test_linear executable with equal input and output sizes
+    Format x-axis tick label showing dimensions and memory size
+    """
+    mem_size = format_size(in_size * out_size, for_plot=True)
+    return f"{in_size}×{out_size}\n{mem_size}"
+
+def run_test(in_size, out_size):
+    """
+    Run the test_linear executable with the given dimensions
     """
     tests_dir = Path(__file__).parent.parent / "tests"
     test_exe = tests_dir / "test_linear"
-
+    
     # Calculate memory requirements
-    matrix_elements = size * size
-    matrix_memory_gb = (matrix_elements * 4) / (1024**3)  # in GB
+    matrix_elements = in_size * out_size
+    matrix_memory_gb = (matrix_elements * 4) / (1024**3)  # Convert to GB
     
     # Set a timeout based on matrix size to prevent tests from hanging
     timeout = min(300, max(30, int(matrix_memory_gb * 60)))  # 30s minimum, 300s maximum
     
     try:
         # Run the test with timeout
-        print(f"  Running test with timeout of {timeout}s...")
+        print(f"Running test with dimensions {in_size}×{out_size} ({format_size(matrix_elements)})...")
         result = subprocess.run(
-            [str(test_exe), str(size), str(size)],
+            [str(test_exe), str(in_size), str(out_size)],
             cwd=tests_dir,
             capture_output=True,
             text=True,
@@ -102,229 +110,167 @@ def run_test(size):
         # Parse the output
         output = result.stdout
         results = {}
-        parsing_results = False
+        inside_results = False
         
         for line in output.split('\n'):
             if line.strip() == "LINEAR_RESULTS:":
-                parsing_results = True
+                inside_results = True
                 continue
             elif line.strip() == "END_RESULTS":
-                parsing_results = False
+                inside_results = False
                 continue
-            
-            if parsing_results and ':' in line:
+                
+            if inside_results and ':' in line:
                 key, value = line.split(':', 1)
                 key = key.strip()
                 value = value.strip()
                 
-                # Skip empty values
                 if not value:
                     continue
                     
                 try:
-                    # Try to convert to float if there's a decimal point,
-                    # otherwise try to convert to int
                     if '.' in value:
                         results[key] = float(value)
                     else:
                         results[key] = int(value)
                 except ValueError:
-                    print(f"Warning: Could not parse value '{value}' for key '{key}'")
+                    # Skip values that can't be parsed
                     continue
-
-        # If we didn't get valid results, the test probably crashed
-        if not results:
-            print(f"Error: No results parsed from test output for size={size}")
-            print("Test output:")
-            print(output)
-            # Return default values indicating failure
-            return {
-                'Size': size,
-                'MatrixSize': size*size,
-                'CPU_Time': 0,
-                'GPU_Time': 0,
-                'Speedup': 0,
-                'Valid': 0
-            }
-
-        # Add matrix size
-        results['Size'] = size
-        results['MatrixSize'] = size*size
+                    
+        # Add dimensions to results
+        results['InputSize'] = in_size
+        results['OutputSize'] = out_size
+        results['MatrixElements'] = in_size * out_size
         
+        # Verify that essential values were parsed
+        required_keys = ['CPU_Time', 'GPU_Time', 'Speedup', 'Valid']
+        missing = [k for k in required_keys if k not in results]
+        
+        if missing:
+            print(f"Error: Missing required values in output: {missing}")
+            return None
+            
         return results
-
-    except subprocess.TimeoutExpired:
-        print(f"Error: Test timed out after {timeout}s for size={size}")
-        return {
-            'Size': size,
-            'MatrixSize': size*size,
-            'CPU_Time': 0,
-            'GPU_Time': 0,
-            'Speedup': 0,
-            'Valid': 0,
-            'TimedOut': True
-        }
-    except subprocess.SubprocessError as e:
-        print(f"Error running test with size={size}: {e}")
-        if hasattr(e, 'stdout'):
-            print(f"Test output: {e.stdout}")
-        if hasattr(e, 'stderr'):
-            print(f"Error output: {e.stderr}")
         
-        # Return default values indicating failure
-        return {
-            'Size': size,
-            'MatrixSize': size*size,
-            'CPU_Time': 0,
-            'GPU_Time': 0,
-            'Speedup': 0,
-            'Valid': 0
-        }
+    except subprocess.TimeoutExpired:
+        print(f"Error: Test timed out after {timeout}s for dimensions {in_size}×{out_size}")
+        return None
+    except subprocess.SubprocessError as e:
+        print(f"Error running test: {e}")
+        return None
 
 def main():
-    # Build the executable first
+    # Build the executable
     build_test_executable()
     
     # Create plots directory if it doesn't exist
     plots_dir = Path(__file__).parent / "plots"
     plots_dir.mkdir(exist_ok=True)
     
-    # Test with equal dimensions
-    # Start with 2^13 (8192) up to 2^25 (33,554,432)
-    # Use powers of 2 with some steps in between for better distribution
-    sizes = []
-    for i in range(13, 26):
-        sizes.append(2**i)
-        if i < 25:  # Add intermediate points between powers of 2
-            sizes.append(int(2**(i+0.5)))  # Geometric midpoint
+    # Define test cases
+    test_cases = [
+        # Small (MNIST-like)
+        (784, 256),
+        (256, 10),
+        
+        # Medium
+        (1024, 512),
+        (2048, 1024),
+        (4096, 1024),
+        
+        # Large
+        (8192, 2048),
+        (16384, 4096),
+        (32768, 8192),
+        
+        # Very large
+        (65536, 16384),
+        (131072, 32768)
+    ]
     
     results = []
     
-    print("\nRunning tests with equal input and output dimensions...")
-    for size in sizes:
-        # Calculate total matrix size for info
-        total_elements = size * size
-        total_memory = total_elements * 4  # 4 bytes per float
-        memory_gb = total_memory / (1024**3)
+    # Run tests
+    for in_size, out_size in test_cases:
+        result = run_test(in_size, out_size)
+        if result and result['Valid'] == 1:
+            results.append(result)
         
-        # Skip sizes that would use more than 16GB for weight matrix
-        if memory_gb > 16:
-            print(f"Skipping size={size}×{size} ({format_size(total_memory)}) - exceeds memory limit")
-            continue
-            
-        print(f"Testing size={size}×{size} ({format_size(total_memory)})")
-        result = run_test(size)
-        results.append(result)
-        
-        # Safety check: if a mid-sized test fails, skip even larger sizes
-        if result['Valid'] == 0 and memory_gb > 4:
-            print(f"Test failed at {size}×{size}. Skipping larger sizes to avoid crashes.")
+        # Stop if we encounter a large failed test to avoid wasting time
+        if (not result or result['Valid'] == 0) and in_size * out_size > 4 * 1024 * 1024:
+            print(f"Stopping tests after failure with large matrix ({in_size}×{out_size})")
             break
     
-    # Only include valid results for plotting
-    valid_results = [r for r in results if r['Valid'] == 1]
-    
-    if not valid_results:
+    if not results:
         print("No valid results to plot.")
         return
     
-    # Plot 1: Speedup vs Matrix Size
-    plt.figure(figsize=(12, 6))
+    # Sort results by matrix size
+    results.sort(key=lambda r: r['MatrixElements'])
     
     # Extract data for plotting
-    matrix_sizes = [r['MatrixSize'] for r in valid_results]
-    speedups = [r['Speedup'] for r in valid_results]
+    matrix_sizes = [r['MatrixElements'] for r in results]
+    speedups = [r['Speedup'] for r in results]
+    cpu_times = [r['CPU_Time'] for r in results]
+    gpu_times = [r['GPU_Time'] for r in results]
     
-    plt.plot(matrix_sizes, speedups, 'b-o', linewidth=2, markersize=8)
+    # Create x-tick labels
+    xtick_labels = [format_xtick(r['InputSize'], r['OutputSize']) for r in results]
     
-    plt.xscale('log')
-    plt.grid(True, which="both", ls="--", alpha=0.7)
-    plt.xlabel('Matrix Size (elements)')
+    # Plot 1: Speedup vs Matrix Size
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(len(results)), speedups, 'r-o', linewidth=2, markersize=8)
+    plt.xticks(range(len(results)), xtick_labels, rotation=45, ha='right')
+    plt.axhline(y=1, color='k', linestyle='--', alpha=0.5)
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Matrix Dimensions (input×output / memory size)')
     plt.ylabel('Speedup (CPU Time / GPU Time)')
-    plt.title('Linear Layer Speedup vs Matrix Size')
-    
-    # Add dimension labels to x-axis
-    for i, r in enumerate(valid_results):
-        plt.annotate(f"{r['Size']}×{r['Size']}", 
-                    xy=(r['MatrixSize'], speedups[i]),
-                    xytext=(0, 10),
-                    textcoords='offset points',
-                    ha='center')
-    
+    plt.title('cuBLAS Linear Layer Speedup vs. CPU')
     plt.tight_layout()
-    plt.savefig(plots_dir / 'linear_equal_dims_speedup.png')
+    plt.savefig(plots_dir / 'linear_speedup.png')
     plt.close()
     
-    # Plot 2: Execution Times (CPU vs GPU)
+    # Plot 2: Execution Times (log scale)
     plt.figure(figsize=(12, 6))
-    
-    cpu_times = [r['CPU_Time'] for r in valid_results]
-    gpu_times = [r['GPU_Time'] for r in valid_results]
-    
-    plt.plot(matrix_sizes, cpu_times, 'b-o', label='CPU Time', linewidth=2, markersize=8)
-    plt.plot(matrix_sizes, gpu_times, 'r-o', label='GPU Time', linewidth=2, markersize=8)
-    
-    plt.xscale('log')
-    plt.yscale('log')
-    plt.grid(True, which="both", ls="--", alpha=0.7)
-    plt.xlabel('Matrix Size (elements)')
+    plt.semilogy(range(len(results)), cpu_times, 'g-o', label='CPU', linewidth=2, markersize=8)
+    plt.semilogy(range(len(results)), gpu_times, 'r-o', label='cuBLAS', linewidth=2, markersize=8)
+    plt.xticks(range(len(results)), xtick_labels, rotation=45, ha='right')
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Matrix Dimensions (input×output / memory size)')
     plt.ylabel('Time (ms, log scale)')
-    plt.title('Linear Layer Execution Time vs Matrix Size')
+    plt.title('Linear Layer Execution Time')
     plt.legend()
-    
-    # Add dimension labels to x-axis
-    for i, r in enumerate(valid_results):
-        plt.annotate(f"{r['Size']}×{r['Size']}", 
-                    xy=(r['MatrixSize'], max(cpu_times[i], gpu_times[i])),
-                    xytext=(0, 10),
-                    textcoords='offset points',
-                    ha='center')
-    
     plt.tight_layout()
-    plt.savefig(plots_dir / 'linear_equal_dims_times.png')
+    plt.savefig(plots_dir / 'linear_times.png')
     plt.close()
     
-    # Plot 3: Performance trends
-    plt.figure(figsize=(12, 6))
+    # Print summary table
+    print("\nSummary of Results:")
+    print("-" * 80)
+    print(f"{'Dimensions':<20} {'CPU Time (ms)':<15} {'GPU Time (ms)':<15} {'Speedup':<10} {'Valid':<8}")
+    print("-" * 80)
     
-    sizes_array = [r['Size'] for r in valid_results]
-    flops = [2 * s * s for s in sizes_array]  # Multiply-add operations
+    for r in results:
+        dims = f"{r['InputSize']}×{r['OutputSize']}"
+        print(f"{dims:<20} {r['CPU_Time']:<15.2f} {r['GPU_Time']:<15.2f} {r['Speedup']:<10.2f} {'✓' if r['Valid'] else '✗'}")
     
-    cpu_gflops = [flops[i] / (cpu_times[i] * 1e6) for i in range(len(valid_results))]  # GFLOPS = flops/(time in sec * 1e9)
-    gpu_gflops = [flops[i] / (gpu_times[i] * 1e6) for i in range(len(valid_results))]
+    print("-" * 80)
     
-    plt.plot(sizes_array, cpu_gflops, 'b-o', label='CPU GFLOPS', linewidth=2, markersize=8)
-    plt.plot(sizes_array, gpu_gflops, 'r-o', label='GPU GFLOPS', linewidth=2, markersize=8)
-    
-    plt.xscale('log', base=2)
-    plt.grid(True, which="both", ls="--", alpha=0.7)
-    plt.xlabel('Matrix Dimension')
-    plt.ylabel('GFLOPS (higher is better)')
-    plt.title('Linear Layer Performance in GFLOPS')
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig(plots_dir / 'linear_equal_dims_gflops.png')
-    plt.close()
-    
-    # Print summary statistics
-    print("\nBenchmark Summary:")
-    print(f"Total tests: {len(results)}")
-    print(f"Valid tests: {len(valid_results)}")
-    print(f"Invalid tests: {len(results) - len(valid_results)}")
-    
-    if valid_results:
-        print("\nPerformance Statistics:")
-        print(f"Average speedup: {sum(speedups)/len(speedups):.2f}x")
-        print(f"Maximum speedup: {max(speedups):.2f}x (at {valid_results[speedups.index(max(speedups))]['Size']}×{valid_results[speedups.index(max(speedups))]['Size']})")
+    # Print some statistics
+    if results:
+        max_speedup = max(speedups)
+        max_speedup_idx = speedups.index(max_speedup)
+        max_speedup_dims = (results[max_speedup_idx]['InputSize'], results[max_speedup_idx]['OutputSize'])
         
-        print("\nMatrix size with best CPU performance (GFLOPS):")
-        max_cpu_idx = cpu_gflops.index(max(cpu_gflops))
-        print(f"  {valid_results[max_cpu_idx]['Size']}×{valid_results[max_cpu_idx]['Size']} achieved {cpu_gflops[max_cpu_idx]:.2f} GFLOPS")
+        print(f"Maximum speedup: {max_speedup:.2f}x with dimensions {max_speedup_dims[0]}×{max_speedup_dims[1]}")
         
-        print("\nMatrix size with best GPU performance (GFLOPS):")
-        max_gpu_idx = gpu_gflops.index(max(gpu_gflops))
-        print(f"  {valid_results[max_gpu_idx]['Size']}×{valid_results[max_gpu_idx]['Size']} achieved {gpu_gflops[max_gpu_idx]:.2f} GFLOPS")
+        # Find the crossover point (where speedup > 1)
+        for i, s in enumerate(speedups):
+            if s > 1:
+                crossover_dims = (results[i]['InputSize'], results[i]['OutputSize'])
+                crossover_elements = results[i]['MatrixElements']
+                print(f"GPU becomes faster than CPU at matrix size: {crossover_dims[0]}×{crossover_dims[1]} ({format_size(crossover_elements)})")
+                break
     
     print("\nAll plots have been generated in the plots directory")
 
