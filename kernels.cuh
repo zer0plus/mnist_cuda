@@ -36,6 +36,7 @@ __global__ void matrix_multiply_kernel(float *weights, float *inp, float *out, f
 
 //testing
 void backward_cuda(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr);
+void backward_cuda_cublas(GenericLayer *layer, float *inp, float *out_grad, float *in_grad, float lr);
 __global__ void update_out_grad_kernel(float *out_grad, float *output, unsigned char *d_labels, int d_label_idx);
 
 // To Test
