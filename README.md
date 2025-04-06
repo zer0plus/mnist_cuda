@@ -42,8 +42,8 @@ The linear layer computes `output = weights × input + biases`, forming the core
 
 **Analysis:**
 - GPU acceleration provides significant speedup for larger matrices
-- At matrix sizes smaller than 1024×512, CPU can be faster due to device memory transfer overhead
-- Maximum observed speedup: ~20x for the largest tested matrices
+- At matrix sizes smaller than 784×256, CPU can be faster due to device memory transfer overhead
+- Maximum observed speedup: ~50x for the largest tested matrices
 - Performance scales well with increasing matrix dimensions
 
 ### 2. ReLU Activation
@@ -62,10 +62,11 @@ The ReLU activation function applies a simple non-linear transform: `f(x) = max(
 ![ReLU Derivative Speedup](benchmarks/plots/derivative_relu_speedup.png)
 
 **Analysis:**
-- ReLU activation shows near-linear scaling with increasing data size
-- Forward and backward (derivative) implementations both show significant speedups
-- The operation becomes memory-bound at larger sizes, with speedup plateauing
-- GPU implementation demonstrates 10-20x speedup for typical batch sizes
+- Forward ReLU shows poor GPU acceleration for small to medium sizes, with speedup < 1 until ~2^24 elements
+- Forward pass only achieves ~3x maximum speedup at the largest tested size (2^26)
+- In stark contrast, ReLU derivative shows exceptional GPU scaling, reaching ~130x speedup
+- Derivative operation begins showing benefits at moderate sizes (~2^18) and scales exponentially
+- The forward ReLU's limited arithmetic intensity makes it memory-bound, while the derivative implementation allows better computational parallelism
 
 ### 3. Softmax Activation
 
@@ -83,9 +84,9 @@ The softmax activation normalizes the output of the network into a probability d
 ![Softmax Times](benchmarks/plots/softmax_times.png)
 
 **Analysis:**
-- Softmax shows impressive speedups due to the high arithmetic intensity
-- Small input sizes show limited benefit due to kernel launch overhead
-- Large input sizes demonstrate 50-100x speedup
+- Softmax illustrates the classic case where operations with high arithmetic intensity but parallel structure excel on GPU architecture
+- Small input sizes(< 2<sup>10</sup>) do noy show any benefit due to kernel launch overhead
+- Large input sizes demonstrate speedup that is too great to measure against the CPU
 - The exponential operations benefit greatly from GPU's specialized math units
 
 ### 4. Backward Pass (Gradient Computation)
@@ -94,7 +95,7 @@ The backward pass updates network weights based on computed gradients, critical 
 
 **Optimizations:**
 - Used cuBLAS for matrix operations in gradient computation
-- Implemented custom kernels with tiling for weight updates
+- Implemented separate custom kernels with tiling for weight updates
 - Used shared memory for gradient accumulation
 - Optimized thread block configurations for both large and small matrices
 
@@ -104,8 +105,8 @@ The backward pass updates network weights based on computed gradients, critical 
 ![Backward Custom vs cuBLAS](benchmarks/plots/backward_custom_vs_cublas.png)
 
 **Analysis:**
-- Custom CUDA implementation sometimes outperforms cuBLAS for specific matrix sizes
-- Backward pass shows greatest speedup for large batch sizes
+- Custom CUDA implementation sometimes outperforms cuBLAS for specific small matrix sizes
+- Backward pass shows greatest speedup for large input sizes
 - Performance scales well with network size
 - Custom kernels provide flexibility for network-specific optimizations
 
@@ -127,7 +128,7 @@ Efficient data loading is crucial for training performance, especially with larg
 **Analysis:**
 - GPU provides significant speedup for image preprocessing
 - Label reading shows minimal benefit on GPU due to small data size
-- Overall data loading time reduced by ~3-4x
+- Overall data loading time reduced by ~2-3x
 - The normalization step benefits most from parallelization
 
 ## General Optimization Principles
@@ -156,7 +157,7 @@ Throughout this project, several key optimization principles were applied:
    - Leveraged warp shuffle operations for efficient communication
    - Used warp-level voting functions for divergence management
 
-## Performance Scaling
+## Performance Scaling Observations
 
 Performance scaling varies significantly based on the operation and data size:
 
@@ -165,12 +166,7 @@ Performance scaling varies significantly based on the operation and data size:
    - Small matrices (<1024 elements) often see limited benefit due to overhead
    - Optimal performance requires tuning block sizes based on matrix dimensions
 
-2. **Batch Size Considerations**
-   - Larger batch sizes improve GPU utilization
-   - Extremely large batches may cause memory limitations
-   - Optimal batch size balances utilization and memory constraints
-
-3. **Operation Intensity**
+2. **Operation Intensity**
    - Compute-bound operations (softmax, matrix multiply) show highest speedups
    - Memory-bound operations (ReLU) show more modest improvements
    - I/O-bound operations show least improvement unless preprocessing is complex
@@ -182,7 +178,28 @@ Performance scaling varies significantly based on the operation and data size:
 - GCC/G++ compatible with your CUDA version
 - Python 3.6+ with matplotlib (for benchmarking)
 
-### Building the Project
+## Running the MNIST Implementation
+
+### CPU Implementation
+
+```bash
+gcc -DRUN_MNIST_CPU -O3 -march=native -ffast-math -c mnist.c -o mnist.o && \
+gcc -DRUN_MNIST_CPU -O3 -march=native -ffast-math mnist.o -o mnist -lm && \
+./mnist
+```
+
+### CUDA Implementation
+
+```bash
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA -c mnist.cu -o mnist_cuda.o && \
+nvcc -O3 -arch=sm_86 -rdc=true -DRUN_MNIST_CUDA mnist_cuda.o -o mnist_cuda -lcudadevrt -lcurand -lcuda -lcublas -lcudnn && \
+./mnist_cuda
+```
+
+**Note:** You may need to adjust the `-arch=sm_86` parameter based on your GPU architecture.
+
+
+### Building the Project for benchmarking
 ```bash
 # Compile the CPU implementation
 gcc -O3 -march=native -ffast-math -c mnist.c -o mnist.o
@@ -197,9 +214,3 @@ nvcc -O3 -arch=sm_86 -rdc=true -c mnist.cu -o mnist_cuda.o
 cd benchmarks
 python plot_linear.py  # Or any other benchmark script
 ```
-
-## Conclusion
-
-This project demonstrates the significant performance benefits of GPU acceleration for neural network operations. Through careful optimization and implementation of CUDA kernels, speedups of 10-100x are achievable for various network components, with the greatest benefits seen in compute-intensive operations on larger datasets.
-
-The techniques demonstrated here scale to larger networks and can be applied to a wide range of deep learning applications beyond MNIST classification. The principles of memory optimization, efficient parallelization, and algorithm specialization are fundamental to high-performance AI acceleration.
