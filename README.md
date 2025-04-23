@@ -11,7 +11,7 @@ This project implements a neural network for MNIST handwritten digit classificat
 - Hidden layer (256 neurons with ReLU activation)
 - Output layer (10 neurons with softmax activation)
 
-Each component has been implemented twice - once in standard C for CPU and once in CUDA for GPU - with multiple optimizations to demonstrate the performance benefits of GPU acceleration for neural network training.
+Each component has been implemented twice - once in standard C for CPU and once in CUDA with multiple GPU optimizations to demonstrate the performance benefits of GPU acceleration for neural network training.
 
 ## Hardware Specifications
 
