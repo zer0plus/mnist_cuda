@@ -112,7 +112,7 @@ The backward pass updates network weights based on computed gradients, critical 
 
 ### 5. Data Loading
 
-Efficient data loading is crucial for training performance, especially with larger datasets.
+This primarily consists of loading and normalizing the MNIST image data.
 
 **Optimizations:**
 - Implemented parallel data normalization on GPU
@@ -128,7 +128,7 @@ Efficient data loading is crucial for training performance, especially with larg
 **Analysis:**
 - GPU provides significant speedup for image preprocessing
 - Label reading shows minimal benefit on GPU due to small data size
-- Overall data loading time reduced by ~2-3x
+- Overall data loading time was improved by ~2-3x
 - The normalization step benefits most from parallelization
 
 ## General Optimization Principles
